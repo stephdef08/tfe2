@@ -3,7 +3,7 @@ from transformers import DeiTForImageClassification
 import torch
 from argparse import ArgumentParser, ArgumentTypeError
 import database.dataset as dataset
-from database.loss import MarginLoss
+from database.loss import MarginLoss, ProxyNCA_prob
 import time
 import numpy as np
 from torch import nn
@@ -17,10 +17,6 @@ class Model(torch.nn.Module):
         # for param in self.model.parameters():
         #     param.requires_grad = False
 
-        # for module in filter(lambda m: type(m) == nn.BatchNorm2d, self.model.modules()):
-        #     module.eval()
-        #     module.train = lambda _: None
-
         self.model.classifier = torch.nn.Linear(768, num_features)
         self.norm = torch.nn.functional.normalize
 
@@ -32,6 +28,10 @@ class Model(torch.nn.Module):
         else:
             self.model.train()
 
+        for module in filter(lambda m: type(m) == nn.LayerNorm, self.model.modules()):
+            module.eval()
+            module.train = lambda _: None
+
         self.eval = eval
         self.device = device
         self.num_features = num_features
@@ -41,21 +41,34 @@ class Model(torch.nn.Module):
     def forward(self, input):
         return self.norm(self.model(input).logits, 1)
 
-    def train_epochs(self, dir, epochs, sched, alan, reguliser):
-        lr = 0.0001
-        decay = 0.0004
-        beta_lr = 0.0005
-        gamma = 0.3
-
+    def train_epochs(self, dir, epochs, sched, alan, reguliser, loss):
         data = dataset.DRDataset(dir, 2, alan, True)
         print(data.__len__())
 
-        loss_function = MarginLoss(n_classes=len(data.classes), reguliser=reguliser)
+        if loss == 'margin':
+            lr = 0.0001
+            decay = 0.0004
+            beta_lr = 0.0005
+            gamma = 0.3
+            loss_function = MarginLoss(n_classes=len(data.classes), reguliser=reguliser)
 
-        to_optim = [{'params':self.parameters(),'lr':lr,'weight_decay':decay},
-                    {'params':loss_function.parameters(), 'lr':beta_lr, 'weight_decay':0}]
+            to_optim = [{'params':self.parameters(),'lr':lr,'weight_decay':decay},
+                        {'params':loss_function.parameters(), 'lr':beta_lr, 'weight_decay':0}]
 
-        optimizer = torch.optim.Adam(to_optim)
+            optimizer = torch.optim.Adam(to_optim)
+        elif loss == 'proxy_nca_pp':
+            lr_model = 4e-3
+            lr_proxies = 4e2
+            gamma = 0.3
+
+            loss_function = ProxyNCA_prob(len(data.classes), 128, 3, device)
+
+            to_optim = [
+                {'params':self.parameters(), 'weight_decay':0},
+                {'params':loss_function.parameters(), 'lr': lr_proxies},
+            ]
+
+            optimizer = torch.optim.Adam(to_optim, lr=lr_model, eps=1)
 
         if sched == 'exponential':
             scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
@@ -83,7 +96,6 @@ class Model(torch.nn.Module):
                     optimizer.zero_grad(set_to_none=True)
                     loss.backward()
                     optimizer.step()
-
                     loss_list.append(loss.item())
 
                 print("epoch {}, loss = {}, time {}".format(epoch, np.mean(loss_list),
@@ -151,6 +163,11 @@ if __name__ == "__main__":
         default='contrastive_p'
     )
 
+    parser.add_argument(
+        '--loss',
+        default='margin'
+    )
+
     args = parser.parse_args()
 
     if args.gpu_id >= 0:
@@ -161,4 +178,4 @@ if __name__ == "__main__":
     m = Model(num_features=args.num_features, batch_size=args.batch_size,
               name=args.file_name, eval=False, device=device)
 
-    m.train_epochs(args.training_data, args.num_epochs, args.scheduler, args.alan, args.reguliser)
+    m.train_epochs(args.training_data, args.num_epochs, args.scheduler, args.alan, args.reguliser, args.loss)

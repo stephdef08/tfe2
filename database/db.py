@@ -9,6 +9,7 @@ import redis
 import numpy as np
 from transformers import ViTFeatureExtractor
 from transformers import DeiTFeatureExtractor
+import time
 
 class Database:
     def __init__(self, filename, model, load=False, transformer=False):
@@ -28,7 +29,7 @@ class Database:
 
         self.count = self.index.ntotal
 
-        # self.index = faiss.index_cpu_to_gpu(res, 0, self.index)
+        self.index = faiss.index_cpu_to_gpu(res, 0, self.index)
 
         # self.feat_extract = ViTFeatureExtractor.from_pretrained('google/vit-base-patch16-224',
         #                                                         image_mean=[0.485, 0.456, 0.406],
@@ -36,7 +37,7 @@ class Database:
         self.feat_extract = DeiTFeatureExtractor.from_pretrained('facebook/deit-base-distilled-patch16-224',
                                                                  size=224, do_center_crop=False,
                                                                  image_mean=[0.485, 0.456, 0.406],
-                                                                 image_std=[0.229, 0.224, 0.225]) if not transformer else None
+                                                                 image_std=[0.229, 0.224, 0.225]) if transformer else None
 
     @torch.no_grad()
     def add(self, x, names):
@@ -47,16 +48,17 @@ class Database:
             self.count += 1
 
     @torch.no_grad()
-    def add_dataset(self, data_root):
+    def add_dataset(self, data_root, name_list = []):
         # if not self.index.is_trained:
         #     print("Index not trained")
         #     exit()
-
         transformer = not self.feat_extract
 
-        data = dataset.AddDataset(data_root, transformer)
-        loader = torch.utils.data.DataLoader(data, batch_size=128,
-                                             num_workers=12, pin_memory=True)
+        if name_list == []:
+            data = dataset.AddDataset(data_root, transformer)
+        else:
+            data = dataset.AddDatasetList(data_root, name_list, transformer)
+        loader = torch.utils.data.DataLoader(data, batch_size=128, num_workers=12, pin_memory=True)
 
         for i, (images, filenames) in enumerate(loader):
             images = images.view(-1, 3, 224, 224).to(device=next(self.model.parameters()).device)
@@ -72,6 +74,7 @@ class Database:
         # if not self.index.is_trained:
         #     print("Index not trained")
         #     exit()
+        t_model = time.time()
         if not self.feat_extract:
             image = transforms.Resize((224, 224))(x)
             image = transforms.ToTensor()(image)
@@ -83,15 +86,17 @@ class Database:
             image = self.feat_extract(images=x, return_tensors='pt')['pixel_values']
 
         out = self.model(image.to(device=next(self.model.parameters()).device).view(1, 3, 224, 224))
-
+        t_model = time.time() - t_model
+        t_search = time.time()
         distance, labels = self.index.search(out.cpu().numpy(), nrt_neigh)
 
         names = []
 
         for l in labels[0]:
             names.append(self.r.get(str(l)).decode("utf-8"))
+        t_search = time.time() - t_search
 
-        return names, distance
+        return names, distance, t_model, t_search
 
     def train(self, data_root):
         batch_size = 128

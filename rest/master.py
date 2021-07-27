@@ -1,8 +1,10 @@
-from flask import Flask, request, Response
+from fastapi import FastAPI
+import uvicorn
 import argparse
 import json
+import multiprocessing
 
-app = Flask(__name__)
+app = FastAPI()
 
 class Master:
     def __init__(self, ip, port, servers):
@@ -10,36 +12,34 @@ class Master:
         self.port = port
         self.servers = set(servers)
 
+parser = argparse.ArgumentParser()
 
-@app.route('/')
-def general():
-    req = request.args
+parser.add_argument(
+    '--ip',
+    default='127.0.0.1'
+)
 
-    if 'servers_list' in req:
-        return json.dumps({'list': list(master.servers)})
+parser.add_argument(
+    '--port',
+    default=8000,
+    type=int
+)
 
-    return Response(status=404)
+parser.add_argument(
+    '--server_addresses',
+    nargs='+'
+)
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
+args = parser.parse_args()
 
-    parser.add_argument(
-        '--ip',
-        default='127.0.0.1'
-    )
 
-    parser.add_argument(
-        '--port',
-        default=8000
-    )
-
-    parser.add_argument(
-        '--server_addresses',
-        nargs='+'
-    )
-
-    args = parser.parse_args()
-
+if __name__ != '__main__':
     master = Master(args.ip, args.port, args.server_addresses)
 
-    app.run(host=args.ip, port=args.port)
+@app.get('/servers_list')
+def servers_list():
+    return {'list': list(master.servers)}
+
+if __name__ == '__main__':
+    uvicorn.run('master:app', host=args.ip, port=args.port, reload=True,
+                debug=True, workers=multiprocessing.cpu_count())

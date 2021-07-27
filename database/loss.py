@@ -1,5 +1,8 @@
 import torch
 import numpy as np
+import torch.nn.functional as F
+import sklearn
+import sklearn.preprocessing
 
 def distanceweightedsampling(batch, labels, lower_cutoff=0.5, upper_cutoff=1.4, contrastive_p=.2):
     """
@@ -168,11 +171,12 @@ class MarginLoss(torch.nn.Module):
 
         #differential entropy reguliser
         if self.reguliser == 'entropy':
+            norm_fact = 0.1 / batch.shape[0]
             for i in range(batch.shape[0]):
                 not_equal = batch[torch.cat((torch.arange(0, i), torch.arange(i+1, batch.shape[0])))]
                 dist = ((batch[i] - not_equal).pow(2).sum(dim=1)).pow(1/2)
                 min_dist = torch.min(dist)
-                loss -= torch.log(min_dist)
+                loss -= torch.log(min_dist) * norm_fact
 
         #(Optional) Add regularization penalty on betas.
         if self.nu:
@@ -180,3 +184,87 @@ class MarginLoss(torch.nn.Module):
             loss = loss + beta_regularisation_loss.type(torch.cuda.FloatTensor)
 
         return loss
+
+
+class ProxyNCA_prob(torch.nn.Module):
+    def __init__(self, nb_classes, sz_embed, scale, device):
+        torch.nn.Module.__init__(self)
+        self.proxies = torch.nn.Parameter(torch.randn(nb_classes, sz_embed) / 8).to(device=device)
+        self.scale = scale
+        self.device = device
+
+    def forward(self, X, T):
+        P = self.proxies
+        #note: self.scale is equal to sqrt(1/T)
+        # in the paper T = 1/9, therefore, scale = sart(1/(1/9)) = sqrt(9) = 3
+        #  we need to apply sqrt because the pairwise distance is calculated as norm^2
+
+        P = self.scale * F.normalize(P, p = 2, dim = -1)
+        X = self.scale * F.normalize(X, p = 2, dim = -1)
+
+        D = pairwise_distance(
+            torch.cat(
+                [X, P]
+            ),
+            squared = True
+        )[:X.size()[0], X.size()[0]:]
+
+        T = binarize_and_smooth_labels(
+            T = T, nb_classes = len(P), smoothing_const = 0
+        )
+
+        loss = torch.sum(- T * F.log_softmax(-D, -1), -1)
+        loss = loss.mean()
+        return loss
+
+def binarize_and_smooth_labels(T, nb_classes, smoothing_const = 0):
+    device = T.device
+    T = T.cpu().numpy()
+    T = sklearn.preprocessing.label_binarize(
+        T, classes = range(0, nb_classes)
+    )
+    T = T * (1 - smoothing_const)
+    T[T == 0] = smoothing_const / (nb_classes - 1)
+    T = torch.FloatTensor(T).to(device=device)
+
+    return T
+
+def pairwise_distance(a, squared=False):
+    """Computes the pairwise distance matrix with numerical stability."""
+    pairwise_distances_squared = torch.add(
+        a.pow(2).sum(dim=1, keepdim=True).expand(a.size(0), -1),
+        torch.t(a).pow(2).sum(dim=0, keepdim=True).expand(a.size(0), -1)
+    ) - 2 * (
+        torch.mm(a, torch.t(a))
+    )
+
+    # Deal with numerical inaccuracies. Set small negatives to zero.
+    pairwise_distances_squared = torch.clamp(
+        pairwise_distances_squared, min=0.0
+    )
+
+    # Get the mask where the zero distances are at.
+    error_mask = torch.le(pairwise_distances_squared, 0.0)
+    #print(error_mask.sum())
+    # Optionally take the sqrt.
+    if squared:
+        pairwise_distances = pairwise_distances_squared
+    else:
+        pairwise_distances = torch.sqrt(
+            pairwise_distances_squared + error_mask.float() * 1e-16
+        )
+
+    # Undo conditionally adding 1e-16.
+    pairwise_distances = torch.mul(
+        pairwise_distances,
+        (error_mask == False).float()
+    )
+
+    # Explicitly set diagonals to zero.
+    mask_offdiagonals = 1 - torch.eye(
+        *pairwise_distances.size(),
+        device=pairwise_distances.device
+    )
+    pairwise_distances = torch.mul(pairwise_distances, mask_offdiagonals)
+
+    return pairwise_distances

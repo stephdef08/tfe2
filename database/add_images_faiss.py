@@ -3,6 +3,7 @@ from argparse import ArgumentParser, ArgumentTypeError
 import database.densenet as densenet
 import torch
 import database.transformer as transformer
+import time
 
 if __name__ == "__main__":
     usage = "python3 add_images.py --path <folder> [--extractor <algorithm> --db_name <name> --num_features <num>]"

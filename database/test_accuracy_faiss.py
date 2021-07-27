@@ -13,6 +13,7 @@ import sklearn.metrics
 import pandas as pd
 import seaborn as sn
 import matplotlib.pyplot as plt
+import time
 
 class TestDataset(Dataset):
     def __init__(self, root='patch/val'):
@@ -57,8 +58,8 @@ class TestDataset(Dataset):
     def __getitem__(self, idx):
         return self.img_list[idx]
 
-def test(model, dataset):
-    database = db.Database("db", model, True)
+def test(model, dataset, db_name):
+    database = db.Database(db_name, model, True)
 
     data = TestDataset(dataset)
 
@@ -76,8 +77,16 @@ def test(model, dataset):
     ground_truth = []
     predictions = []
 
+    t_search = 0
+    t_model = 0
+    t_tot = 0
+
     for i, image in enumerate(loader):
-        names, _ = database.search(Image.open(image[0]).convert('RGB'))
+        t = time.time()
+        names, _, t_model_tmp, t_search_tmp = database.search(Image.open(image[0]).convert('RGB'))
+        t_tot += time.time() - t
+        t_model += t_model_tmp
+        t_search += t_search_tmp
 
         similar = names[:5]
 
@@ -120,6 +129,10 @@ def test(model, dataset):
     print("top-1 accuracy : ", top_1_acc / data.__len__())
     print("top-5 accuracy : ", top_5_acc / data.__len__())
 
+    print('t_tot:', t_tot)
+    print('t_model:', t_model)
+    print('t_search:', t_search)
+
     cm = sklearn.metrics.confusion_matrix(ground_truth, predictions)
     df_cm = pd.DataFrame(cm, index=data.conversion.keys(), columns=data.conversion.keys())
     plt.figure(figsize = (10,7))
@@ -159,6 +172,11 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        '--db_name',
+        default='db'
+    )
+
+    parser.add_argument(
         '--attention',
         action='store_true'
     )
@@ -182,4 +200,4 @@ if __name__ == "__main__":
     else:
         model = transformer.Model(num_features=args.num_features, name=args.file_name, device=device)
 
-    test(model, args.path)
+    test(model, args.path, args.db_name)

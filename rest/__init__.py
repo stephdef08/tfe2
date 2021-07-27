@@ -1,1 +1,1 @@
-from .rest import *
+from rest import storage

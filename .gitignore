@@ -2,3 +2,4 @@
 weights*
 db
 dump.rdb
+store/*

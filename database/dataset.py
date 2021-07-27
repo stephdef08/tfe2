@@ -138,31 +138,31 @@ class AddDataset(Dataset):
     def __init__(self, root, transformer=False):
         self.root = root
         self.list_img = []
-        # self.transform = kornia.augmentation.AugmentationSequential(
-        #     kornia.augmentation.RandomVerticalFlip(p=.5),
-        #     kornia.augmentation.RandomHorizontalFlip(p=.5),
-        #     kornia.augmentation.ColorJitter(brightness=0, contrast=0, saturation=.2, hue=.1),
-        #     kornia.augmentation.RandomResizedCrop((224, 224), scale=(.7,1)),
-        #     kornia.augmentation.RandomElasticTransform(alpha=(1.5, 1.5)),
-        #     kornia.augmentation.Normalize(
-        #         mean=torch.Tensor([0.485, 0.456, 0.406]),
-        #         std=torch.Tensor([0.229, 0.224, 0.225])
-        #     ),
-        #     return_transform=False,
-        #     same_on_batch=False
-        # )
-
-        self.transform = transforms.Compose(
-            [
-                transforms.Resize((224, 224)),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406],
-                    std=[0.229, 0.224, 0.225]
-                )
-            ]
-
+        self.transform = kornia.augmentation.AugmentationSequential(
+            kornia.augmentation.RandomVerticalFlip(p=.5),
+            kornia.augmentation.RandomHorizontalFlip(p=.5),
+            kornia.augmentation.ColorJitter(brightness=0, contrast=0, saturation=.2, hue=.1),
+            kornia.augmentation.RandomResizedCrop((224, 224), scale=(.7,1)),
+            # kornia.augmentation.RandomElasticTransform(alpha=(1.5, 1.5)),
+            kornia.augmentation.Normalize(
+                mean=torch.Tensor([0.485, 0.456, 0.406]),
+                std=torch.Tensor([0.229, 0.224, 0.225])
+            ),
+            return_transform=False,
+            same_on_batch=False
         )
+
+        # self.transform = transforms.Compose(
+        #     [
+        #         transforms.Resize((224, 224)),
+        #         transforms.ToTensor(),
+        #         transforms.Normalize(
+        #             mean=[0.485, 0.456, 0.406],
+        #             std=[0.229, 0.224, 0.225]
+        #         )
+        #     ]
+        #
+        # )
 
         self.transformer = transformer
 
@@ -181,6 +181,42 @@ class AddDataset(Dataset):
         for subdir, dirs, files in os.walk(root):
             for f in files:
                 self.list_img.append(os.path.join(subdir, f))
+
+    def __len__(self):
+        return len(self.list_img)
+
+    def __getitem__(self, idx):
+        img = Image.open(self.list_img[idx]).convert('RGB')
+
+        if not self.transformer:
+            return self.transform(img), self.list_img[idx]
+
+        return self.feature_extractor(images=img, return_tensors='pt')['pixel_values'], self.list_img[idx]
+
+class AddDatasetList(Dataset):
+    def __init__(self, root, name_list, transformer=False):
+        self.root = root
+        self.list_img = []
+        self.transform = transforms.Compose(
+            [
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406],
+                    std=[0.229, 0.224, 0.225]
+                )
+            ]
+        )
+
+        self.transformer = transformer
+
+        self.feature_extractor = DeiTFeatureExtractor.from_pretrained('facebook/deit-base-distilled-patch16-224',
+                                                                      size=224, do_center_crop=False,
+                                                                      image_mean=[0.485, 0.456, 0.406],
+                                                                      image_std=[0.229, 0.224, 0.225])
+
+        for n in name_list:
+            self.list_img.append(os.path.join(root, n))
 
     def __len__(self):
         return len(self.list_img)
