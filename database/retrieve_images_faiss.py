@@ -5,6 +5,7 @@ from PIL import Image
 import time
 import torch
 import database.transformer as transformer
+import os
 
 class ImageRetriever:
     def __init__(self, db_name, model):
@@ -73,6 +74,10 @@ if __name__ == "__main__":
 
     if args.path is None:
         print(usage)
+        exit(-1)
+
+    if not os.path.isfile(args.path):
+        print('Path mentionned is not a file')
         exit(-1)
 
     model = None

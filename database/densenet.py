@@ -6,9 +6,7 @@ from torchvision import transforms
 import database.dataset as dataset
 import numpy as np
 import time
-from database.loss import MarginLoss
-
-import kornia
+from database.loss import MarginLoss, ProxyNCA_prob, NormSoftmax
 
 from argparse import ArgumentParser, ArgumentTypeError
 
@@ -30,7 +28,7 @@ class Model(nn.Module):
         elif model == 'resnet':
             self.conv_net.fc = nn.Linear(2048, out_features).to(device=device)
 
-        self.relu = nn.LeakyReLU().to(device=device)
+        # self.relu = nn.LeakyReLU().to(device=device)
 
         if attention:
             self.att_layer = torch.nn.MultiheadAttention(out_features, 1).to(device=device)
@@ -69,7 +67,8 @@ class Model(nn.Module):
             tensor1 = tensor1.unsqueeze(0)
             tensor1 = self.att_layer(tensor1, tensor1, tensor1)[0].view((-1, self.num_features))
 
-        tensor1 = self.norm(self.relu(tensor1))
+        # tensor1 = self.norm(self.relu(tensor1))
+        tensor1 = self.norm(tensor1)
 
         if self.use_dr:
             tensor2 = self.first_conv1(input)
@@ -86,21 +85,47 @@ class Model(nn.Module):
 
         return tensor1
 
-    def train_epochs(self, dir, epochs, sched, alan, reguliser):
-        lr = 0.0001
-        decay = 0.0004
-        beta_lr = 0.0005
-        gamma = 0.3
-
+    def train_epochs(self, dir, epochs, sched, alan, reguliser, loss):
         data = dataset.DRDataset(dir, 2, alan)
         print(data.__len__())
 
-        loss_function = MarginLoss(n_classes=len(data.classes), reguliser=reguliser)
+        if loss == 'margin':
+            lr = 0.0001
+            decay = 0.0004
+            beta_lr = 0.0005
+            gamma = 0.3
+            loss_function = MarginLoss(n_classes=len(data.classes), reguliser=reguliser)
 
-        to_optim = [{'params':self.parameters(),'lr':lr,'weight_decay':decay},
-                    {'params':loss_function.parameters(), 'lr':beta_lr, 'weight_decay':0}]
+            to_optim = [{'params':self.parameters(),'lr':lr,'weight_decay':decay},
+                        {'params':loss_function.parameters(), 'lr':beta_lr, 'weight_decay':0}]
 
-        optimizer = torch.optim.Adam(to_optim)
+            optimizer = torch.optim.Adam(to_optim)
+        elif loss == 'proxy_nca_pp':
+            lr_model = 4e-3
+            lr_proxies = 4e2
+            gamma = 0.3
+
+            loss_function = ProxyNCA_prob(len(data.classes), self.num_features, 3, device)
+
+            to_optim = [
+                {'params':self.parameters(), 'weight_decay':0},
+                {'params':loss_function.parameters(), 'lr': lr_proxies},
+            ]
+
+            optimizer = torch.optim.Adam(to_optim, lr=lr_model, eps=1)
+        elif loss == 'softmax':
+            lr = 0.0001
+            decay = 0.0004
+            lr_proxies = .00001
+            gamma = 0.9
+            loss_function = NormSoftmax(0.05, len(data.classes), self.num_features, lr_proxies, self.device)
+
+            to_optim = [
+                {'params':self.parameters(),'lr':lr,'weight_decay':decay},
+                {'params':loss_function.parameters(),'lr':lr_proxies,'weight_decay':decay}
+            ]
+
+            optimizer = torch.optim.Adam(to_optim)
 
         if sched == 'exponential':
             scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
@@ -109,7 +134,7 @@ class Model(nn.Module):
                                                             gamma=gamma)
 
         loader = torch.utils.data.DataLoader(data, batch_size=self.batch_size,
-                                             shuffle=True, num_workers=4,
+                                             shuffle=True, num_workers=12,
                                              pin_memory=True)
 
         loss_list = []
@@ -134,7 +159,6 @@ class Model(nn.Module):
                     if i % 100 == 0:
                         print("epoch {}, batch {}, loss = {}".format(epoch, i,
                                                                      np.mean(loss_list)))
-                        loss_list.clear()
 
                 print("epoch {}, loss = {}, time {}".format(epoch, np.mean(loss_list),
                                                             time.time() - start_time))
@@ -216,6 +240,11 @@ if __name__ == "__main__":
         default='contrastive_p'
     )
 
+    parser.add_argument(
+        '--loss',
+        default='margin'
+    )
+
     args = parser.parse_args()
 
     if args.gpu_id >= 0:
@@ -227,4 +256,4 @@ if __name__ == "__main__":
               num_features=args.num_features, name=args.file_name,
               use_dr=args.dr_model, attention=args.attention, device=device)
 
-    m.train_epochs(args.training_data, args.num_epochs, args.scheduler, args.alan, args.reguliser)
+    m.train_epochs(args.training_data, args.num_epochs, args.scheduler, args.alan, args.reguliser, args.loss)

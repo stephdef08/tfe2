@@ -96,6 +96,18 @@ def inverse_sphere_distances(batch, dist, labels, anchor_label):
         q_d_inv = q_d_inv/q_d_inv.sum()
         return q_d_inv.detach().cpu().numpy()
 
+def pairwise_NNs_inner(x):
+    """
+    Pairwise nearest neighbors for L2-normalized vectors.
+    Uses Torch rather than Faiss to remain on GPU.
+    """
+    # parwise dot products (= inverse distance)
+    dots = torch.mm(x, x.t())
+    n = x.shape[0]
+    dots.view(-1)[::(n+1)].fill_(-1)  # Trick to fill diagonal with -1
+    _, I = torch.max(dots, 1)  # max inner prod -> min distance
+    return I
+
 class MarginLoss(torch.nn.Module):
     def __init__(self, margin=0.2, nu=0, beta=1.2, n_classes=100, beta_constant=False, sampling_method='distance', reguliser='entropy'):
         """
@@ -126,6 +138,9 @@ class MarginLoss(torch.nn.Module):
                                                                          0.2 if reguliser=='contrastive_p' else 0)
 
         self.reguliser = reguliser
+
+        if reguliser == 'entropy':
+            self.pdist = torch.nn.PairwiseDistance(2)
 
 
     def forward(self, batch, labels):
@@ -171,12 +186,9 @@ class MarginLoss(torch.nn.Module):
 
         #differential entropy reguliser
         if self.reguliser == 'entropy':
-            norm_fact = 0.1 / batch.shape[0]
-            for i in range(batch.shape[0]):
-                not_equal = batch[torch.cat((torch.arange(0, i), torch.arange(i+1, batch.shape[0])))]
-                dist = ((batch[i] - not_equal).pow(2).sum(dim=1)).pow(1/2)
-                min_dist = torch.min(dist)
-                loss -= torch.log(min_dist) * norm_fact
+            I = pairwise_NNs_inner(batch)
+            distances = self.pdist(batch, batch[I])
+            loss -= torch.log(batch.shape[0] * distances).mean() * .1
 
         #(Optional) Add regularization penalty on betas.
         if self.nu:
@@ -268,3 +280,22 @@ def pairwise_distance(a, squared=False):
     pairwise_distances = torch.mul(pairwise_distances, mask_offdiagonals)
 
     return pairwise_distances
+
+class NormSoftmax(torch.nn.Module):
+    def __init__(self, temperature, n_classes, embed_dim, loss_softmax_lr, device):
+        super(NormSoftmax, self).__init__()
+        self.temperature = temperature
+
+        self.class_map = torch.nn.Parameter(torch.Tensor(n_classes, embed_dim)).to(device=device)
+        stdv = 1. / np.sqrt(self.class_map.size(1))
+        self.class_map.data.uniform_(-stdv, stdv)
+
+        self.lr = loss_softmax_lr
+
+
+    def forward(self, batch, labels, **kwargs):
+        class_mapped_batch = torch.nn.functional.linear(batch, torch.nn.functional.normalize(self.class_map, dim=1))
+
+        loss = torch.nn.CrossEntropyLoss()(class_mapped_batch/self.temperature, labels.to(torch.long))
+
+        return loss

@@ -24,6 +24,9 @@ class TestDataset(Dataset):
 
         classes = os.listdir(root)
         classes = sorted(classes)
+
+        classes_tmp = []
+
         # classes = classes[:len(classes) // 2 + 1]
 
         self.conversion = {x: i for i, x in enumerate(classes)}
@@ -193,6 +196,10 @@ if __name__ == "__main__":
         device = 'cuda:' + str(args.gpu_id)
     else:
         device = 'cpu'
+
+    if not os.path.isdir(args.path):
+        print('Path mentionned is not a folder')
+        exit(-1)
 
     if args.extractor != 'transformer':
         model = Model(num_features=args.num_features, name=args.file_name, model=args.extractor,

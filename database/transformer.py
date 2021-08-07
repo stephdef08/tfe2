@@ -14,8 +14,8 @@ class Model(torch.nn.Module):
         # self.model = ViTForImageClassification.from_pretrained('google/vit-base-patch16-224')
         self.model = DeiTForImageClassification.from_pretrained('facebook/deit-base-distilled-patch16-224')
 
-        # for param in self.model.parameters():
-        #     param.requires_grad = False
+        for param in self.model.parameters():
+            param.requires_grad = False
 
         self.model.classifier = torch.nn.Linear(768, num_features)
         self.norm = torch.nn.functional.normalize
@@ -69,6 +69,19 @@ class Model(torch.nn.Module):
             ]
 
             optimizer = torch.optim.Adam(to_optim, lr=lr_model, eps=1)
+        elif loss == 'softmax':
+            lr = 0.0001
+            decay = 0.0004
+            lr_proxies = .00001
+            gamma = 0.9
+            loss_function = NormSoftmax(0.05, len(data.classes), self.num_features, lr_proxies, self.device)
+
+            to_optim = [
+                {'params':self.parameters(),'lr':lr,'weight_decay':decay},
+                {'params':loss_function.parameters(),'lr':lr_proxies,'weight_decay':decay}
+            ]
+
+            optimizer = torch.optim.Adam(to_optim)
 
         if sched == 'exponential':
             scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)

@@ -3,3 +3,6 @@ weights*
 db
 dump.rdb
 store/*
+db_unlabeled
+db_labeled
+*test*

@@ -6,7 +6,6 @@ import os
 import numpy as np
 import copy
 from collections import defaultdict
-import kornia
 from transformers import ViTFeatureExtractor
 from transformers import DeiTFeatureExtractor
 # import cv2
@@ -138,31 +137,31 @@ class AddDataset(Dataset):
     def __init__(self, root, transformer=False):
         self.root = root
         self.list_img = []
-        self.transform = kornia.augmentation.AugmentationSequential(
-            kornia.augmentation.RandomVerticalFlip(p=.5),
-            kornia.augmentation.RandomHorizontalFlip(p=.5),
-            kornia.augmentation.ColorJitter(brightness=0, contrast=0, saturation=.2, hue=.1),
-            kornia.augmentation.RandomResizedCrop((224, 224), scale=(.7,1)),
-            # kornia.augmentation.RandomElasticTransform(alpha=(1.5, 1.5)),
-            kornia.augmentation.Normalize(
-                mean=torch.Tensor([0.485, 0.456, 0.406]),
-                std=torch.Tensor([0.229, 0.224, 0.225])
-            ),
-            return_transform=False,
-            same_on_batch=False
-        )
-
         # self.transform = transforms.Compose(
-        #     [
-        #         transforms.Resize((224, 224)),
-        #         transforms.ToTensor(),
-        #         transforms.Normalize(
-        #             mean=[0.485, 0.456, 0.406],
-        #             std=[0.229, 0.224, 0.225]
-        #         )
-        #     ]
-        #
-        # )
+        #         [
+        #             transforms.RandomVerticalFlip(.5),
+        #             transforms.RandomHorizontalFlip(.5),
+        #             transforms.ColorJitter(brightness=0, contrast=0, saturation=.2, hue=.1),
+        #             transforms.RandomResizedCrop(224, scale=(.7,1)),
+        #             transforms.ToTensor(),
+        #             transforms.Normalize(
+        #                 mean=[0.485, 0.456, 0.406],
+        #                 std=[0.229, 0.224, 0.225]
+        #             )
+        #         ]
+        #     )
+
+        self.transform = transforms.Compose(
+            [
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406],
+                    std=[0.229, 0.224, 0.225]
+                )
+            ]
+
+        )
 
         self.transformer = transformer
 

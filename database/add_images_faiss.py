@@ -4,6 +4,7 @@ import database.densenet as densenet
 import torch
 import database.transformer as transformer
 import time
+import os
 
 if __name__ == "__main__":
     usage = "python3 add_images.py --path <folder> [--extractor <algorithm> --db_name <name> --num_features <num>]"
@@ -73,7 +74,7 @@ if __name__ == "__main__":
         print(usage)
         exit(-1)
 
-    if args.path[-1] != "/":
+    if not os.path.isdir(args.path):
         print("The path mentionned is not a folder")
         exit(-1)
 
