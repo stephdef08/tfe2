@@ -6,7 +6,6 @@ import os
 import numpy as np
 import copy
 from collections import defaultdict
-from transformers import ViTFeatureExtractor
 from transformers import DeiTFeatureExtractor
 # import cv2
 
@@ -137,31 +136,31 @@ class AddDataset(Dataset):
     def __init__(self, root, transformer=False):
         self.root = root
         self.list_img = []
-        # self.transform = transforms.Compose(
-        #         [
-        #             transforms.RandomVerticalFlip(.5),
-        #             transforms.RandomHorizontalFlip(.5),
-        #             transforms.ColorJitter(brightness=0, contrast=0, saturation=.2, hue=.1),
-        #             transforms.RandomResizedCrop(224, scale=(.7,1)),
-        #             transforms.ToTensor(),
-        #             transforms.Normalize(
-        #                 mean=[0.485, 0.456, 0.406],
-        #                 std=[0.229, 0.224, 0.225]
-        #             )
-        #         ]
-        #     )
-
         self.transform = transforms.Compose(
-            [
-                transforms.Resize((224, 224)),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406],
-                    std=[0.229, 0.224, 0.225]
-                )
-            ]
+                [
+                    transforms.RandomVerticalFlip(.5),
+                    transforms.RandomHorizontalFlip(.5),
+                    transforms.ColorJitter(brightness=0, contrast=0, saturation=.2, hue=.1),
+                    transforms.RandomResizedCrop(224, scale=(.7,1)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(
+                        mean=[0.485, 0.456, 0.406],
+                        std=[0.229, 0.224, 0.225]
+                    )
+                ]
+            )
 
-        )
+        # self.transform = transforms.Compose(
+        #     [
+        #         transforms.Resize((224, 224)),
+        #         transforms.ToTensor(),
+        #         transforms.Normalize(
+        #             mean=[0.485, 0.456, 0.406],
+        #             std=[0.229, 0.224, 0.225]
+        #         )
+        #     ]
+        #
+        # )
 
         self.transformer = transformer
 
@@ -227,3 +226,32 @@ class AddDatasetList(Dataset):
             return self.transform(img), self.list_img[idx]
 
         return self.feature_extractor(images=img, return_tensors='pt')['pixel_values'], self.list_img[idx]
+
+class AddSlide(Dataset):
+    def __init__(self, patches, slide):
+        self.patches = patches
+        self.slide = slide
+        self.transform = transforms.Compose(
+            [
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406],
+                    std=[0.229, 0.224, 0.225]
+                )
+            ]
+        )
+
+    def __len__(self):
+        if self.slide.level_count > 1:
+            return self.patches.shape[0] * 2
+        else:
+            return self.patches.shape[0]
+
+    def __getitem__(self, key):
+        if key < self.patches.shape[0]:
+            return self.transform(self.slide.read_region((self.patches[key, 1] * 224, self.patches[key, 0] * 224), 0,
+                                                         (224, 224)).convert('RGB'))
+        else:
+            return self.transform(self.slide.read_region((self.patches[key-self.patches.shape[0], 1] * 224, self.patches[key-self.patches.shape[0], 0] * 224), 1,
+                                                         (224, 224)).convert('RGB'))

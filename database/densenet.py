@@ -117,7 +117,7 @@ class Model(nn.Module):
             lr = 0.0001
             decay = 0.0004
             lr_proxies = .00001
-            gamma = 0.9
+            gamma = 0.3
             loss_function = NormSoftmax(0.05, len(data.classes), self.num_features, lr_proxies, self.device)
 
             to_optim = [

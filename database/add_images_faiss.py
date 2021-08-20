@@ -63,6 +63,8 @@ if __name__ == "__main__":
         type=int
     )
 
+    parser.add_argument('--labeled', action='store_true')
+
     args = parser.parse_args()
 
     if args.gpu_id >= 0:
@@ -90,6 +92,21 @@ if __name__ == "__main__":
         print("Unkown feature extractor")
         exit(-1)
 
-    database = Database(args.db_name, model, load= not args.rewrite)
+    database = Database(args.db_name, model, load= not args.rewrite, transformer=args.extractor=='transformer')
+
+    name_list = ['janowczyk2_0', 'janowczyk2_1', 'lbpstroma_0', 'lbpstroma_1', 'patterns_no_aug_0', 'patterns_no_aug_1',
+                 'mitos2014_0', 'mitos2014_1', 'mitos2014_2', 'ulg_lbtd_lba0', 'ulg_lbtd_lba1', 'ulg_lbtd_lba2', 'ulg_lbtd_lba3',
+                 'ulg_lbtd_lba4', 'ulg_lbtd_lba5', 'ulg_lbtd_lba6', 'ulg_lbtd_lba7', 'iciar18_micro0', 'iciar18_micro1',
+                 'iciar18_micro2', 'iciar18_micro3', 'tupac_mitosis0', 'tupac_mitosis1', 'camelyon16_0', 'camelyon16_1',
+                 'umcm_colorectal_01', 'umcm_colorectal_02', 'umcm_colorectal_03', 'umcm_colorectal_04', 'umcm_colorectal_05',
+                 'umcm_colorectal_06', 'umcm_colorectal_07', 'umcm_colorectal_08', 'warwick_crc0']
+
+    ls = os.listdir(os.path.join(args.path))
+    for n in name_list:
+        ls.remove(n)
+    import os
+    names_list = []
+    for n in ls:
+        names_list +=  [os.path.join(n, img) for img in os.listdir(os.path.join(args.path, n))]
 
     database.add_dataset(args.path)

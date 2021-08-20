@@ -11,8 +11,8 @@ class ImageRetriever:
     def __init__(self, db_name, model):
         self.db = Database(db_name, model, True)
 
-    def retrieve(self, image):
-        return self.db.search(image)[0]
+    def retrieve(self, image, nrt_neigh=10):
+        return self.db.search(image, nrt_neigh)[0]
 
 if __name__ == "__main__":
     usage = "python3 add_images.py --path <image_name> [--extractor <algorithm> --db_name <name> --num_features <num>]"
@@ -83,7 +83,7 @@ if __name__ == "__main__":
     model = None
 
     if args.extractor != "transformer":
-        model = densenet.Model(num_features=args.num_features, name=args.file_name,
+        model = densenet.Model(model=args.extractor, num_features=args.num_features, name=args.file_name,
                                use_dr=args.dr_model, attention=args.attention, device=device)
     else:
         model = transformer.Model(num_features=args.num_features, name=args.file_name, device=device)

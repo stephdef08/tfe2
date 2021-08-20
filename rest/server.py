@@ -19,12 +19,22 @@ from transformers import DeiTFeatureExtractor
 import zipfile
 from database import dataset
 import faiss
+from cytomine import Cytomine
+from cytomine.models.image import ImageInstance
+from cytomine.models import AnnotationCollection
+from cytomine.models import TermCollection
+from openslide import OpenSlide
+import cv2
+import numpy as np
+from database.dataset import AddSlide
+from sklearn.cluster import KMeans
+import requests
 
 app = FastAPI()
 
 class Server:
     def __init__(self, ip, port, master_ip, master_port, model, num_features,
-                 weights, use_dr, device, attention, image_folder):
+                 weights, use_dr, device, attention, image_folder, http, db_name):
         self.ip = ip
         self.port = port
         self.master_ip = master_ip
@@ -32,15 +42,16 @@ class Server:
         if model != 'transformer':
             self.model = Model(model, num_features=num_features, name=weights,
                                use_dr=use_dr, device=device, attention=attention)
-            self.feat_extract = None
         else:
-            self.feat_extract = DeiTFeatureExtractor.from_pretrained('facebook/deit-base-distilled-patch16-224',
-                                                                     size=224, do_center_crop=False,
-                                                                     image_mean=[0.485, 0.456, 0.406],
-                                                                     image_std=[0.229, 0.224, 0.225])
             self.model = transformer.Model(num_features, name=weights, device=device)
-        self.database = Database("db", self.model, load=True)
+        self.database = Database(db_name, self.model, load=True,
+                                 transformer = model=='transformer', device='cpu')
         self.image_folder = image_folder
+
+        requests.get('{}://{}:{}/connect'.format('http' if http else 'https', master_ip, master_port),
+                     params={'ip': '{}:{}'.format(self.ip, self.port), 'nbr_images': self.database.index_labeled.ntotal +
+                        self.database.index_unlabeled.ntotal})
+
 
 parser = argparse.ArgumentParser()
 
@@ -103,6 +114,15 @@ parser.add_argument(
     default='images'
 )
 
+parser.add_argument(
+    '--http',
+    action='store_true'
+)
+
+parser.add_argument(
+    '--db_name',
+    default='db'
+)
 args = parser.parse_args()
 
 if args.gpu_id >= 0:
@@ -113,7 +133,7 @@ else:
 if __name__ != '__main__':
     server = Server(args.ip, args.port, args.master_ip, args.master_port,
                     args.model, args.num_features, args.weights, args.use_dr,
-                    device, args.attention, args.folder)
+                    device, args.attention, args.folder, args.http, args.db_name)
 
     names = {}
 
@@ -165,7 +185,7 @@ def retrieve_images(retrieve_class: str, labels: LabelList, public_key: str=''):
 
         for i in labels.labels:
             img = Image.open(names[public_key][int(i)])
-            if names[public_key].count('/') > 1:
+            if names[public_key][int(i)].count('/') > 1:
                 end = names[public_key][int(i)].rfind("/")
                 begin = names[public_key][int(i)].rfind("/", 0, end) + 1
                 cls.append(names[public_key][int(i)][begin: end])
@@ -194,7 +214,7 @@ async def index_image(image: UploadFile=File(...), label: str=''):
 
     async with lock:
         with torch.no_grad():
-            if not server.feat_extract:
+            if not server.database.feat_extract:
                 image = transforms.Resize((224, 224))(img)
                 image = transforms.ToTensor()(image)
                 image = transforms.Normalize(
@@ -202,7 +222,7 @@ async def index_image(image: UploadFile=File(...), label: str=''):
                     std=[0.229, 0.224, 0.225]
                 )(image)
             else:
-                image = server.feat_extract(images=img, return_tensors='pt')['pixel_values']
+                image = server.database.feat_extract(images=img, return_tensors='pt')['pixel_values']
 
             out = server.model(image.to(device=next(server.model.parameters()).device).view(1, 3, 224, 224))
 
@@ -213,7 +233,7 @@ async def index_image(image: UploadFile=File(...), label: str=''):
     return
 
 @app.post('/index_folder')
-async def index_folder(folder: UploadFile=File(...)):
+async def index_folder(labeled: bool, folder: UploadFile=File(...)):
     content = await folder.read()
 
     zf = zipfile.ZipFile(BytesIO(content))
@@ -221,16 +241,40 @@ async def index_folder(folder: UploadFile=File(...)):
 
     name_list_bis = []
 
-    for n in name_list:
-        name = n[n.rfind('/')+1: n.rfind('.')] + '.png'
-        name_list_bis.append(name)
+    if labeled:
+        name_list = [n for n in name_list if n.rfind('/') != len(n)-1 ]
+        for n in name_list:
+            count = n.count('/')
+            if count > 1 or count == 0:
+                raise HTTPException(status_code=422, detail='Format of zipfile not respected')
+            idx = n.rfind('/')
+            cls = n[: idx]
+            name = n[idx + 1: n.rfind('.')] + '.png'
 
-        if not os.path.exists(os.path.join(server.image_folder, n)):
+            name_list_bis.append(os.path.join(cls, name))
+
+            if os.path.exists(os.path.join(server.image_folder, cls, name)):
+                raise HTTPException(status_code=409, detail='{} already exists'.format(os.path.join(cls, name)))
+            if not os.path.exists(os.path.join(server.image_folder, cls)):
+                os.makedirs(os.path.join(server.image_folder, cls))
             img = Image.open(BytesIO(zf.read(n)))
-            img.save(os.path.join(server.image_folder, name), 'PNG')
+            img.save(os.path.join(server.image_folder, cls, name), 'PNG')
+    else:
+        for n in name_list:
+            count = n.count('/')
+            if count != 0:
+                raise HTTPException(status_code=422, detail='Format of zipfile not respected')
+            name = n[: n.rfind('.')] + '.png'
+            name_list_bis.append(name)
+
+            if not os.path.exists(os.path.join(server.image_folder, n)):
+                img = Image.open(BytesIO(zf.read(n)))
+                img.save(os.path.join(server.image_folder, name), 'PNG')
+            else:
+                raise HTTPException(status_code=409, detail='{} already exists'.format(n))
 
     batch_size = 128
-    data = dataset.AddDatasetList(server.image_folder, name_list_bis, not server.feat_extract)
+    data = dataset.AddDatasetList(server.image_folder, name_list_bis, not server.database.feat_extract)
     loader = torch.utils.data.DataLoader(data, batch_size=batch_size, pin_memory=True)
     with torch.no_grad():
         for batch, n in loader:
@@ -239,9 +283,9 @@ async def index_folder(folder: UploadFile=File(...)):
 
                 out = server.model(batch).cpu()
 
-                server.database.add(out.numpy(), list(n))
+                server.database.add(out.numpy(), list(n), labeled)
 
-    server.database.save()
+                server.database.save()
 
     return
 
@@ -253,6 +297,143 @@ async def remove_image(name: str):
     else:
         async with lock:
             server.database.remove(name)
+
+@app.get('/heartbeat')
+def heartbeat():
+    return {'nbr_images': server.database.index_labeled.ntotal + server.database.index_unlabeled.ntotal}
+
+class CytomineImage(BaseModel):
+    id: int
+    width: int
+    height: int
+    project: str
+    resolution: str = None
+    magnification: int = None
+    filename: str
+    originalFilename: str
+
+@app.get('/add_slide')
+async def add_slide(client_pub_key: str, client_pri_key: str, image_params: CytomineImage):
+    with Cytomine(host='https://research.cytomine.be/', public_key=client_pub_key, private_key=client_pri_key):
+        if image_params.filename != 'CMU-1.svs':
+            return
+        im = ImageInstance()
+        im.id = image_params.id
+        im.width, im.height = image_params.width, image_params.height
+        im.resolution = image_params.resolution
+        im.magnification = image_params.magnification
+        im.filename, im.originalFilename = image_params.filename, image_params.originalFilename
+        # im.download(os.path.join(str(image_params.project), '{originalFilename}'))
+
+    slide = OpenSlide(os.path.join(str(image_params.project), image_params.originalFilename))
+    slide.get_thumbnail((512, 512))
+
+    patch_x, patch_y = image_params.width // 224, image_params.height // 224
+    thumb = slide.get_thumbnail((patch_x, patch_y)).convert('L')
+    _, th = cv2.threshold(np.array(thumb), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    patches = np.transpose(np.where(th == 0))
+
+    with torch.no_grad():
+        data = AddSlide(patches, slide)
+        outs = np.zeros((data.__len__(), server.model.num_features))
+
+        data = torch.utils.data.DataLoader(data, 128, pin_memory=True)
+
+        for i, image in enumerate(data):
+            image = image.to(device=server.model.device)
+            outs[128 * i: (i+1) * 128, :] = server.model(image).cpu().numpy()
+
+    k = KMeans(500).fit(outs)
+
+    name_list = []
+    idx_list = []
+
+    for i in range(500):
+        idx = np.where(k.labels_ == i)[0]
+        idx_tmp = np.absolute(outs[k.labels_ == i] - k.cluster_centers_[i]).sum(axis=1).argmin()
+        idx_list.append(idx[idx_tmp])
+
+        if idx[idx_tmp] >= patches.shape[0]:
+            img = slide.read_region((patches[idx[idx_tmp]-patches.shape[0], 1] * 224,
+                                     patches[idx[idx_tmp]-patches.shape[0], 0] * 224), 0, (224, 224)).convert('RGB')
+        else:
+            img = slide.read_region((patches[idx[idx_tmp], 1] * 224,
+                                     patches[idx[idx_tmp], 0] * 224), 0, (224, 224)).convert('RGB')
+        name = im.filename[: im.filename.find('.')]
+        if idx[idx_tmp] >= patches.shape[0]:
+            name = os.path.join(server.image_folder, name + '_{}_{}_mag.png'.format(patches[idx[idx_tmp]-patches.shape[0], 1] * 224,
+                                                                                patches[idx[idx_tmp]-patches.shape[0], 0] * 224))
+        else:
+            name = os.path.join(server.image_folder, name + '_{}_{}.png'.format(patches[idx[idx_tmp], 1] * 224,
+                                                                                patches[idx[idx_tmp], 0] * 224))
+        if not os.path.exists(os.path.join(server.image_folder, name)):
+            img.save(name, 'PNG')
+            name_list.append(name)
+
+    class ds(torch.utils.data.Dataset):
+        def __init__(self, vectors, name_list, root):
+            self.root = root
+            self.vectors = vectors
+            self.name_list = name_list
+        def __len__(self):
+            return len(self.name_list)
+        def __getitem__(self, key):
+            return self.vectors[key, :], os.path.join(self.name_list[key])
+
+    with torch.no_grad():
+        outs = outs[idx_list, :]
+        data = ds(outs, name_list, server.image_folder)
+        data = torch.utils.data.DataLoader(data, 128, pin_memory=True)
+        for i, (vectors, names) in enumerate(data):
+            async with lock:
+                server.database.add(vectors.numpy().astype(np.float32), names, False)
+                server.database.save()
+
+    return
+
+@app.get('/add_slide_annotations')
+async def add_slide_annotations(client_pub_key: str, client_pri_key: str, project_id: int, term: str):
+    with Cytomine(host='https://research.cytomine.be/', public_key=client_pub_key, private_key=client_pri_key):
+        terms = TermCollection().fetch_with_filter('project', project_id)
+        term_id = None
+        for t in terms:
+            if t.name == term:
+                term_id = t.id
+        if term_id is None:
+            raise HTTPException(status_code=404, detail='Term {} not found in project with id {}'.format(term, project_id))
+        annotations = AnnotationCollection()
+        annotations.project = project_id
+        annotations.showWKT = True
+        annotations.showMeta = True
+        annotations.showGIS = True
+        annotations.showTerm = True
+        annotations.fetch()
+
+        if not os.path.exists(os.path.join(server.image_folder, term)):
+            os.makedirs(os.path.join(server.image_folder, term))
+
+        image_names = []
+
+        for annotation in annotations:
+            if term_id in annotation.term and annotation.area >= 700 and annotation.area < 5000:
+                name = os.path.join(term, '{}.jpg'.format(annotation.id))
+                annotation.dump(os.path.join(server.image_folder, name))
+                image_names.append(name)
+
+        batch_size = 128
+        data = dataset.AddDatasetList(server.image_folder, image_names, not server.database.feat_extract)
+        loader = torch.utils.data.DataLoader(data, batch_size=batch_size, pin_memory=True)
+        with torch.no_grad():
+            for batch, n in loader:
+                async with lock:
+                    batch = batch.view(-1, 3, 224, 224).to(device=next(server.model.parameters()).device)
+
+                    out = server.model(batch).cpu()
+
+                    server.database.add(out.numpy(), list(n), True)
+                    server.database.save()
+    return
 
 if __name__ == '__main__':
     uvicorn.run('server:app', host=args.ip, port= args.port, reload=True,

@@ -13,7 +13,7 @@ import json
 import os
 
 class Database:
-    def __init__(self, filename, model, load=False, transformer=False, device='gpu'):
+    def __init__(self, filename, model, load=False, transformer=False, device='cpu'):
         self.name = filename
         self.embedding_size = 128
         self.model = model
@@ -55,7 +55,8 @@ class Database:
                 self.r.set(str(last_id) + "labeled", '["'+n+'","'+str(x_)+'"]')
                 self.r.set(n, str(last_id) + "labeled")
                 last_id += 1
-            self.r.set('last_id_labeled', last_id + x.shape[0])
+
+            self.r.set('last_id_labeled', last_id)
         else:
             last_id = int(self.r.get('last_id_unlabeled').decode('utf-8'))
             self.index_unlabeled.add_with_ids(x, np.arange(last_id, last_id + x.shape[0]))
@@ -64,7 +65,8 @@ class Database:
                 self.r.set(str(last_id) + "unlabeled", '["'+n+'","'+str(x_)+'"]')
                 self.r.set(n, str(last_id) + "unlabeled")
                 last_id += 1
-            self.r.set('last_id_unlabeled', last_id + x.shape[0])
+
+            self.r.set('last_id_unlabeled', last_id)
 
     @torch.no_grad()
     def add_dataset(self, data_root, name_list=[], label=True):
@@ -98,12 +100,14 @@ class Database:
         else:
             image = self.feat_extract(images=x, return_tensors='pt')['pixel_values']
 
-        out = self.model(image.to(device=next(self.model.parameters()).device).view(1, 3, 224, 224))
+        out = self.model(image.to(device=next(self.model.parameters()).device).view(-1, 3, 224, 224))
         t_model = time.time() - t_model
         t_search = time.time()
 
         if retrieve_class == 'true':
             distance, labels = self.index_labeled.search(out.cpu().numpy(), nrt_neigh)
+            distances = np.zeros((4 * nrt_neigh, 4), dtype=np.float32)
+
             labels = [l for l in list(labels[0]) if l != -1]
 
             names = []
@@ -166,7 +170,11 @@ class Database:
             idx = key.find('labeled')
         else:
             idx = key.find('unlabeled')
-        label = int(key[:idx])
+
+        try:
+            label = int(key[:idx])
+        except:
+            pass
 
         idsel = faiss.IDSelectorRange(label, label+1)
 
@@ -193,61 +201,105 @@ class Database:
 
         os.remove(name)
 
-    def train(self, data_root):
+    def train(self):
         batch_size = 128
 
         class ds(torch.utils.data.Dataset):
-            def __init__(self, r, labeled):
+            def __init__(self, r, labeled, num_features):
                 self.r = r
-                self.size = self.r.execute_command("DBSIZE")
                 self.labeled = labeled
+                self.size = self.r.get('last_id_' + labeled)
+                self.features = num_features
 
             def __len__(self):
-                return self.size
+                return int(self.size.decode())
 
             def __getitem__(self, key):
-                vec = json.loads(self.r.get(str(key) + self.labeled).decode("utf-8"), strict=False)[1]
+                vec = self.r.get(str(key) + self.labeled)
+                if vec is None:
+                    return np.zeros(self.features), 'None'
+                vec = json.loads(vec.decode('utf-8'), strict=False)[1]
                 vec = vec.replace('\n', '').replace('[', '').replace(']', '')
                 vec = np.fromstring(vec, dtype=np.float32, sep=' ')
-                return vec
+                return vec, key
 
-        data = ds(self.r, 'labeled')
+        data = ds(self.r, 'labeled', self.model.num_features)
         loader = torch.utils.data.DataLoader(data, batch_size=batch_size,
                                              num_workers=12, pin_memory=True)
 
         x = np.zeros((data.__len__(), self.model.num_features), dtype=np.float32)
+        keys = np.zeros(data.__len__())
+        num_batches = data.__len__() // batch_size
 
-        for i, x_ in enumerate(loader):
-            x[i * batch_size : (i+1) * batch_size, :] = x_
+        for i, (x_, key) in enumerate(loader):
+            if i == num_batches:
+                x[i * batch_size :, :] = x_
+                keys[i * batch_size :] = key
+            else:
+                x[i * batch_size : (i+1) * batch_size, :] = x_
+                keys[i * batch_size : (i+1) * batch_size] = key
+
+        num_clusters = int(np.sqrt(data.__len__()))
 
         self.quantizer = faiss.IndexFlatL2(self.model.num_features)
         self.index_labeled = faiss.IndexIVFFlat(self.quantizer, self.model.num_features,
-                                        int(np.sqrt(data.__len__())))
+        #change that with self.index_labeled.ntotal
+                                        num_clusters)
 
-        res_labeled = faiss.StandardGpuResources()
-        self.index_labeled = faiss.index_cpu_to_gpu(res, 0, self.index_labeled)
+        if self.device == 'gpu':
+            res_labeled = faiss.StandardGpuResources()
+            self.index_labeled = faiss.index_cpu_to_gpu(res, 0, self.index_labeled)
 
         self.index_labeled.train(x)
-        self.index_labeled.add(x)
+        self.index_labeled.nprobe = num_clusters // 10
 
-        data = ds(self.r, 'unlabeled')
+        for i in range(num_batches):
+            if i == num_batches - 1:
+                x_ = x[i * batch_size:, :]
+                key = keys[i * batch_size:]
+            else:
+                x_ = x[i * batch_size: (i + 1) * batch_size, :]
+                key = keys[i * batch_size: (i+1) * batch_size]
+            self.index_labeled.add_with_ids(x_, np.array(key, dtype=np.int64))
+
+        data = ds(self.r, 'unlabeled', self.model.num_features)
         loader = torch.utils.data.DataLoader(data, batch_size=batch_size,
                                              num_workers=12, pin_memory=True)
 
-        x = np.zeros((data.__len__(), self.model.num_features), dtype=np.float32)
-
-        for i, x_ in enumerate(loader):
-            x[i * batch_size : (i+1) * batch_size, :] = x_
+        num_clusters = int(np.sqrt(data.__len__()))
 
         self.quantizer = faiss.IndexFlatL2(self.model.num_features)
         self.index_unlabeled = faiss.IndexIVFFlat(self.quantizer, self.model.num_features,
                                         int(np.sqrt(data.__len__())))
 
-        res_unlabeled = faiss.StandardGpuResources()
-        self.index_unlabeled = faiss.index_cpu_to_gpu(res, 0, self.index_unlabeled)
+        x = np.zeros((data.__len__(), self.model.num_features), dtype=np.float32)
+        keys = np.zeros(data.__len__())
+        num_batches = data.__len__() // batch_size
+
+        for i, (x_, key) in enumerate(loader):
+            if i == num_batches:
+                x[i * batch_size :, :] = x_
+                keys[i * batch_size :] = key
+            else:
+                x[i * batch_size : (i+1) * batch_size, :] = x_
+                keys[i * batch_size : (i+1) * batch_size] = key
+
+
+        if self.device == 'gpu':
+            res_unlabeled = faiss.StandardGpuResources()
+            self.index_unlabeled = faiss.index_cpu_to_gpu(res, 0, self.index_unlabeled)
 
         self.index_unlabeled.train(x)
-        self.index_unlabeled.add(x)
+        self.index_unlabeled.nprobe = num_clusters // 10
+
+        for i in range(num_batches):
+            if i == num_batches - 1:
+                x_ = x[i * batch_size:, :]
+                key = keys[i * batch_size:]
+            else:
+                x_ = x[i * batch_size: (i + 1) * batch_size, :]
+                key = keys[i * batch_size: (i+1) * batch_size]
+            self.index_unlabeled.add_with_ids(x_, np.array(key, dtype=np.int64))
 
     def save(self):
         if self.device != 'gpu':
@@ -258,10 +310,9 @@ class Database:
             faiss.write_index(faiss.index_gpu_to_cpu(self.index_unlabeled), self.name + '_unlabeled')
 
 if __name__ == "__main__":
-    model = densenet.Model(num_features=128, name='weights/weights_IN_densenet_20')
-    database = Database("db", model, load=True)
+    model = densenet.Model(num_features=128, model='resnet', name='weights/weights_resnet_margin_dr_49')
+    database = Database("store/resnet", model, load=True)
+    # database.train()
+    # database.save()
     print(database.index_labeled.ntotal)
-    database.remove('../tfe1/patch/test/ulg_lbtd_lba2/75996_472563.png')
-    database.remove('../tfe1/patch/test/ulb_anapath_lba6/377614_715383.png')
-    database.remove('../tfe1/patch/test/janowczyk2_0/9023_116894917_600_100_200_200.png')
-    print(database.index_labeled.ntotal)
+    # print(database.index_labeled.ntotal)

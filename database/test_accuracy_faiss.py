@@ -22,8 +22,21 @@ class TestDataset(Dataset):
         self.dic_img = defaultdict(list)
         self.img_list = []
 
+        name_list = ['janowczyk2_0', 'janowczyk2_1', 'lbpstroma_0', 'lbpstroma_1', 'patterns_no_aug_0', 'patterns_no_aug_1',
+                     'mitos2014_0', 'mitos2014_1', 'mitos2014_2', 'ulg_lbtd_lba0', 'ulg_lbtd_lba1', 'ulg_lbtd_lba2', 'ulg_lbtd_lba3',
+                     'ulg_lbtd_lba4', 'ulg_lbtd_lba5', 'ulg_lbtd_lba6', 'ulg_lbtd_lba7', 'iciar18_micro0', 'iciar18_micro1',
+                     'iciar18_micro2', 'iciar18_micro3', 'tupac_mitosis0', 'tupac_mitosis1', 'camelyon16_0', 'camelyon16_1',
+                     'umcm_colorectal_01', 'umcm_colorectal_02', 'umcm_colorectal_03', 'umcm_colorectal_04', 'umcm_colorectal_05',
+                     'umcm_colorectal_06', 'umcm_colorectal_07', 'umcm_colorectal_08', 'warwick_crc0']
+
         classes = os.listdir(root)
         classes = sorted(classes)
+
+        # classes.remove('camelyon16_0')
+        # classes.remove('janowczyk6_0')
+
+        # for n in name_list:
+        #     classes.remove(n)
 
         classes_tmp = []
 
@@ -34,6 +47,8 @@ class TestDataset(Dataset):
         for i in classes:
             for img in os.listdir(os.path.join(root, str(i))):
                 self.dic_img[i].append(os.path.join(root, str(i), img))
+        #         self.img_list.append(os.path.join(root, str(i), img))
+
 
         nbr_empty = 0
         to_delete = []
@@ -61,8 +76,8 @@ class TestDataset(Dataset):
     def __getitem__(self, idx):
         return self.img_list[idx]
 
-def test(model, dataset, db_name):
-    database = db.Database(db_name, model, True)
+def test(model, dataset, db_name, extractor):
+    database = db.Database(db_name, model, True, extractor=='transformer')
 
     data = TestDataset(dataset)
 
@@ -123,12 +138,12 @@ def test(model, dataset, db_name):
         # print("top 5 accuracy {}, round {} ".format((top_5_acc / (i + 1)), i + 1))
 
 
-    print("top1:")
-    for key in sorted(dic_top1.keys()):
-        print(key.replace("_", "\_") + " & " + str(round(dic_top1[key] / nbr_per_class[key], 2)) + "\\\\")
-    print("top5:")
-    for key in sorted(dic_top5.keys()):
-        print(key.replace("_", "\_") + " & " + str(round(dic_top5[key] / nbr_per_class[key], 2)) + "\\\\")
+    # print("top1:")
+    # for key in sorted(dic_top1.keys()):
+    #     print(key.replace("_", "\_") + " & " + str(round(dic_top1[key] / nbr_per_class[key], 2)) + "\\\\")
+    # print("top5:")
+    # for key in sorted(dic_top5.keys()):
+    #     print(key.replace("_", "\_") + " & " + str(round(dic_top5[key] / nbr_per_class[key], 2)) + "\\\\")
     print("top-1 accuracy : ", top_1_acc / data.__len__())
     print("top-5 accuracy : ", top_5_acc / data.__len__())
 
@@ -207,4 +222,4 @@ if __name__ == "__main__":
     else:
         model = transformer.Model(num_features=args.num_features, name=args.file_name, device=device)
 
-    test(model, args.path, args.db_name)
+    test(model, args.path, args.db_name, args.extractor)

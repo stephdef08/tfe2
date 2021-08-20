@@ -3,6 +3,7 @@ import uvicorn
 import argparse
 import json
 import aiohttp
+import requests
 import multiprocessing
 from cytomine import Cytomine
 from io import BufferedReader, BytesIO
@@ -12,6 +13,9 @@ import faiss
 import asyncio
 import random
 import zipfile
+from cytomine.models.image import ImageInstanceCollection
+import threading
+import time
 
 app = FastAPI()
 
@@ -19,8 +23,25 @@ class Master:
     def __init__(self, ip, port, servers, http):
         self.ip = ip
         self.port = port
-        self.servers = set(servers)
+
+        if servers is not None:
+            self.servers = {s: 0 for s in servers}
+        else:
+            self.servers = {}
         self.http = 'http' if http else 'https'
+
+        threading.Thread(target=self.heartbeat, daemon=True).start()
+
+    def heartbeat(self):
+        while True:
+            for ip in self.servers.keys():
+                try:
+                    req = requests.get('{}://{}/heartbeat'.format(self.http, ip), timeout=5)
+                except Exception as e:
+                    self.servers[ip] = np.inf
+            time.sleep(5)
+
+
 
 parser = argparse.ArgumentParser()
 
@@ -52,9 +73,18 @@ if __name__ != '__main__':
     master = Master(args.ip, args.port, args.server_addresses, args.http)
     lock = defaultdict(lambda: asyncio.Lock())
 
+def sort_ips(ip_list):
+    ip_list.sort(key = lambda k: k[1])
+    return [i for i, j in ip_list]
+
+@app.get('/connect')
+def connect(ip: str, nbr_images: int):
+    master.servers[ip] = nbr_images
+    return
+
 @app.get('/servers_list')
 def servers_list():
-    return {'list': list(master.servers)}
+    return {'list': list(master.servers.items())}
 
 @app.post('/get_nearest_images')
 async def nearest_images(nrt_neigh: int, client_pub_key: str='', only_labeled: str='true',
@@ -62,7 +92,8 @@ async def nearest_images(nrt_neigh: int, client_pub_key: str='', only_labeled: s
     with Cytomine(host='https://research.cytomine.be/', public_key=client_pub_key, private_key=client_pri_key):
         content = await image.read()
         responses = []
-        ip_list = list(master.servers)
+        ip_list = list(master.servers.keys())
+
         async with lock[client_pub_key]:
             async with aiohttp.ClientSession(trust_env=True) as session:
                 for ip in ip_list:
@@ -76,6 +107,7 @@ async def nearest_images(nrt_neigh: int, client_pub_key: str='', only_labeled: s
                                                 timeout=aiohttp.ClientTimeout(5)) as resp:
                             responses.append(await resp.json())
                     except Exception as e:
+                        print(e)
                         responses.append(None)
             if np.all(np.array(responses) == None):
                 raise HTTPException(status_code=500, detail='No server alive')
@@ -87,7 +119,7 @@ async def nearest_images(nrt_neigh: int, client_pub_key: str='', only_labeled: s
             distances = np.zeros((len(req) * nrt_neigh, 1), dtype=np.float32)
             for i, r in enumerate(req):
                 distances[i * nrt_neigh: i * nrt_neigh + len(r['distances']), :] = np.array(r['distances']).reshape((-1, 1))
-                distances[i * nrt_neigh + len(r['distances']): (i+1) * nrt_neigh, :] = np.inf
+                distances[i * nrt_neigh + len(r['distances']): (i+1) * nrt_neigh, :] = 100000
             index = faiss.IndexFlatL2(1)
             index.add(distances)
             _, labels = index.search(np.array([[0]], dtype=np.float32), nrt_neigh)
@@ -116,19 +148,17 @@ async def nearest_images(nrt_neigh: int, client_pub_key: str='', only_labeled: s
     if images == []:
         raise HTTPException(status_code=500, detail='No server alive')
 
-    return {'images': [[i for i in im] for im in images],
-            'cls': [[c for c in cl] for cl in cls]}
+    return {'images': [i for sublist in images for i in sublist],
+            'cls': [c for sublist in cls for c in sublist]}
 
 @app.post('/put_image')
 async def put_image(client_pub_key: str, client_pri_key: str, image: UploadFile=File(...), label: str=''):
     with Cytomine(host='https://research.cytomine.be/', public_key=client_pub_key, private_key=client_pri_key):
         content = await image.read()
 
-        ip_list = list(master.servers)
-
+        ip_list = sort_ips(list(master.servers.items()))
         while True:
-            ip = random.choice(ip_list)
-            ip_list.remove(ip)
+            ip = ip_list.pop(0)
             async with aiohttp.ClientSession(trust_env=True) as session:
                 try:
                     data = aiohttp.FormData()
@@ -139,6 +169,8 @@ async def put_image(client_pub_key: str, client_pri_key: str, image: UploadFile=
                                             headers={'Content-Encoding': 'gzip'},
                                             timeout=aiohttp.ClientTimeout(5)) as resp:
                         status = resp.status
+                        if status == 409 or status == 422:
+                            raise HTTPException(status_code=status, detail= await resp.json()['detail'])
                         if status != 200 and ip_list == []:
                             raise HTTPException(status_code=500, detail='No server alive')
                         break
@@ -147,16 +179,38 @@ async def put_image(client_pub_key: str, client_pri_key: str, image: UploadFile=
                         raise HTTPException(status_code=500, detail='No server alive')
 
 @app.post('/put_folder')
-async def put_folder(client_pub_key: str, client_pri_key: str, folder: UploadFile=File(...)):
-    content = await folder.read()
+async def put_folder(client_pub_key: str, client_pri_key: str, labeled: bool, folder: UploadFile=File(...)):
+    with Cytomine(host='https://research.cytomine.be/', public_key=client_pub_key, private_key=client_pri_key):
+        content = await folder.read()
 
-    zf = zipfile.ZipFile(BytesIO(content))
-    name_list = zf.name_list()
+        ip_list = sort_ips(list(master.servers.items()))
+        while True:
+            ip = ip_list.pop(0)
+            async with aiohttp.ClientSession(trust_env=True) as session:
+                try:
+                    data = aiohttp.FormData()
+                    data.add_field('folder', content, filename=folder.filename, content_type='multipart/form-data')
+                    async with session.post('{}://{}/index_folder'.format(master.http, ip),
+                                            data=data,
+                                            params={'labeled': str(labeled)},
+                                            headers={'Content-Encoding': 'gzip'},
+                                            timeout=aiohttp.ClientTimeout(5)) as resp:
+                        status = resp.status
+                        if status == 409 or status == 422:
+                            raise HTTPException(status_code=status, detail= (await resp.json())['detail'])
+                        if status != 200 and ip_list == []:
+                            raise HTTPException(status_code=500, detail='No server alive')
+                        break
+                except HTTPException as h:
+                    raise HTTPException(h.status_code, h.detail)
+                except Exception as e:
+                    if ip_list == []:
+                        raise HTTPException(status_code=500, detail='No server alive')
 
-@app.post('/remove_image')
+@app.get('/remove_image')
 async def remove_image(client_pub_key: str, client_pri_key: str, name: str):
     with Cytomine(host='https://research.cytomine.be/', public_key=client_pub_key, private_key=client_pri_key):
-        ip_list = list(master.servers)
+        ip_list = list(master.servers.keys())
 
         for ip in ip_list:
             async with aiohttp.ClientSession(trust_env=True) as session:
@@ -168,6 +222,51 @@ async def remove_image(client_pub_key: str, client_pri_key: str, name: str):
                 except Exception as e:
                     pass
 
+@app.get('/add_slides')
+async def add_slides(client_pub_key: str, client_pri_key: str, project_id: str):
+    with Cytomine(host='https://research.cytomine.be/', public_key=client_pub_key, private_key=client_pri_key):
+        image_instances = ImageInstanceCollection().fetch_with_filter("project", project_id)
+        for image in image_instances:
+            ip_list = sort_ips(list(master.servers.items()))
+            while True:
+                ip = ip_list.pop()
+                async with aiohttp.ClientSession(trust_env=True) as session:
+                    try:
+                        await session.get('{}://{}/add_slide'.format(master.http, ip),
+                                          params={'client_pub_key': client_pub_key,
+                                                  'client_pri_key': client_pri_key},
+                                          json={'id': image.id, 'width':image.width, 'project': project_id,
+                                                'height': image.height, 'resolution': image.resolution,
+                                                'magnification': image.magnification,
+                                                'filename': image.filename, 'originalFilename': image.filename},
+                                          timeout=aiohttp.ClientTimeout(300))
+                        break
+                    except Exception as e:
+                        print(e)
+                        if ip_list == []:
+                            raise HTTPException(status_code=500, detail='No server alive')
+
+
+
+@app.get('/add_slide_annotations')
+async def add_slides_annotations(client_pub_key: str, client_pri_key: str, project_id: str, label: str):
+    with Cytomine(host='https://research.cytomine.be/', public_key=client_pub_key, private_key=client_pri_key):
+        ip_list = sort_ips(list(master.servers.items()))
+        while True:
+            ip = ip_list.pop(0)
+            async with aiohttp.ClientSession(trust_env=True) as session:
+                try:
+                    await session.get('{}://{}/add_slide_annotations'.format(master.http, ip),
+                                      params={'client_pub_key': client_pub_key,
+                                              'client_pri_key': client_pri_key,
+                                              'project_id': project_id,
+                                              'term': label},
+                                      timeout=aiohttp.ClientTimeout(1000))
+                    break
+                except Exception as e:
+                    print(e)
+                    if ip_list == []:
+                        raise HTTPException(status_code=500, detail='No server alive')
 
 
 if __name__ == '__main__':
