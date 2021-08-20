@@ -184,12 +184,6 @@ class MarginLoss(torch.nn.Module):
         #Actual Margin Loss
         loss = torch.sum(pos_loss+neg_loss) if pair_count==0. else torch.sum(pos_loss+neg_loss)/pair_count
 
-        #differential entropy reguliser
-        if self.reguliser == 'entropy':
-            I = pairwise_NNs_inner(batch)
-            distances = self.pdist(batch, batch[I])
-            loss -= torch.log(batch.shape[0] * distances).mean() * .1
-
         #(Optional) Add regularization penalty on betas.
         if self.nu:
             beta_regularization_loss = torch.sum(beta)
