@@ -23,18 +23,22 @@ from cytomine import Cytomine
 from cytomine.models.image import ImageInstance
 from cytomine.models import AnnotationCollection
 from cytomine.models import TermCollection
+from cytomine.models import CurrentUser
 from openslide import OpenSlide
 import cv2
 import numpy as np
 from database.dataset import AddSlide
 from sklearn.cluster import KMeans
 import requests
+from readerwriterlock import rwlock_async
+import concurrent.futures
 
 app = FastAPI()
 
 class Server:
     def __init__(self, ip, port, master_ip, master_port, model, num_features,
-                 weights, use_dr, device, attention, image_folder, http, db_name):
+                 weights, use_dr, device, attention, image_folder, http, db_name,
+                 host):
         self.ip = ip
         self.port = port
         self.master_ip = master_ip
@@ -47,10 +51,13 @@ class Server:
         self.database = Database(db_name, self.model, load=True,
                                  transformer = model=='transformer', device='cpu')
         self.image_folder = image_folder
+        self.host = host
+
+        self.pool = concurrent.futures.ThreadPoolExecutor()
 
         requests.get('{}://{}:{}/connect'.format('http' if http else 'https', master_ip, master_port),
-                     params={'ip': '{}:{}'.format(self.ip, self.port), 'nbr_images': self.database.index_labeled.ntotal +
-                        self.database.index_unlabeled.ntotal})
+                     params={'ip': '{}:{}'.format(self.ip, self.port), 'nbr_images_labeled': self.database.index_labeled.ntotal,
+                             'nbr_images_unlabeled': self.database.index_unlabeled.ntotal})
 
 
 parser = argparse.ArgumentParser()
@@ -123,6 +130,11 @@ parser.add_argument(
     '--db_name',
     default='db'
 )
+
+parser.add_argument(
+    '--host'
+)
+
 args = parser.parse_args()
 
 if args.gpu_id >= 0:
@@ -133,29 +145,41 @@ else:
 if __name__ != '__main__':
     server = Server(args.ip, args.port, args.master_ip, args.master_port,
                     args.model, args.num_features, args.weights, args.use_dr,
-                    device, args.attention, args.folder, args.http, args.db_name)
+                    device, args.attention, args.folder, args.http, args.db_name,
+                    args.host)
 
     names = {}
 
-    lock = asyncio.Lock()
+    lock = rwlock_async.RWLockRead()
 
 @app.post('/nearest_neighbours/{retrieve_class}')
-async def nearest_neighbours(nrt_neigh: int, public_key: str, retrieve_class: str, image: UploadFile=File(...)):
+async def nearest_neighbours(nrt_neigh: int, public_key: str, private_key: str, retrieve_class: str, image: UploadFile=File(...)):
+    with Cytomine(host=server.host, public_key=public_key, private_key=private_key):
+        user = CurrentUser().fetch()
+        if user is False:
+            raise HTTPException(401, 'Unauthorized')
+
     content = await image.read()
     img = Image.open(BytesIO(content)).convert('RGB')
+    loop = asyncio.get_running_loop()
 
-    async with lock:
-        names[public_key], distance, _, _ = server.database.search(img, nrt_neigh, retrieve_class)
+    async with await lock.gen_rlock():
+        names[public_key], distance, _, _ = await loop.run_in_executor(
+            server.pool, server.database.search, img, nrt_neigh, retrieve_class)
 
-    return {'distances': distance[0].tolist()}
+    return {'distances': distance[0]}
 
 class LabelList(BaseModel):
     labels: list
 
 @app.get('/retrieve_images/{retrieve_class}')
-def retrieve_images(retrieve_class: str, labels: LabelList, public_key: str=''):
-    images = []
+def retrieve_images(retrieve_class: str, labels: LabelList, public_key: str, private_key: str):
+    with Cytomine(host=server.host, public_key=public_key, private_key=private_key):
+        user = CurrentUser().fetch()
+        if user is False:
+            raise HTTPException(401, 'Unauthorized')
 
+    images = []
     if retrieve_class == 'true':
         cls = []
 
@@ -200,19 +224,22 @@ def retrieve_images(retrieve_class: str, labels: LabelList, public_key: str=''):
         return {'images': images, 'cls': cls}
 
 @app.post('/index_image')
-async def index_image(image: UploadFile=File(...), label: str=''):
+async def index_image(public_key: str, private_key: str, image: UploadFile=File(...), label: str=''):
+    with Cytomine(host=server.host, public_key=public_key, private_key=private_key):
+        user = CurrentUser().fetch()
+        if user is False:
+            raise HTTPException(401, 'Unauthorized')
+
     content = await image.read()
     img = Image.open(BytesIO(content)).convert('RGB')
     name = image.filename[image.filename.rfind('/')+1: image.filename.rfind('.')] + '.png'
 
-    if os.path.exists(os.path.join(server.image_folder, label, name)):
-        raise HTTPException(status_code=409, detail='File already exists')
+    async with await lock.gen_wlock():
+        last_id = server.database.r.get('last_id_{}'.format('labeled' if label != '' else 'unlabeled')).decode('utf-8')
+        if not os.path.exists(os.path.join(server.image_folder, label)):
+            os.makedirs(os.path.join(server.image_folder, label))
+            img.save(os.path.join(server.image_folder, label, last_id + '.png'), 'PNG')
 
-    if not os.path.exists(os.path.join(server.image_folder, label)):
-        os.makedirs(os.path.join(server.image_folder, label))
-    img.save(os.path.join(server.image_folder, label, name), 'PNG')
-
-    async with lock:
         with torch.no_grad():
             if not server.database.feat_extract:
                 image = transforms.Resize((224, 224))(img)
@@ -226,14 +253,19 @@ async def index_image(image: UploadFile=File(...), label: str=''):
 
             out = server.model(image.to(device=next(server.model.parameters()).device).view(1, 3, 224, 224))
 
-        server.database.add(out.cpu().numpy().reshape(-1, server.model.num_features),
-                            [os.path.join(server.image_folder, label, name)], label!='')
+            server.database.add(out.cpu().numpy().reshape(-1, server.model.num_features),
+                                [os.path.join(server.image_folder, label, last_id + '.png')], label!='')
 
-        server.database.save()
+            server.database.save()
     return
 
 @app.post('/index_folder')
-async def index_folder(labeled: bool, folder: UploadFile=File(...)):
+async def index_folder(labeled: bool, public_key: str, private_key: str, folder: UploadFile=File(...)):
+    with Cytomine(host=server.host, public_key=public_key, private_key=private_key):
+        user = CurrentUser().fetch()
+        if user is False:
+            raise HTTPException(401, 'Unauthorized')
+
     content = await folder.read()
 
     zf = zipfile.ZipFile(BytesIO(content))
@@ -251,56 +283,63 @@ async def index_folder(labeled: bool, folder: UploadFile=File(...)):
             cls = n[: idx]
             name = n[idx + 1: n.rfind('.')] + '.png'
 
-            name_list_bis.append(os.path.join(cls, name))
+            name_list_bis.append((os.path.join(server.image_folder, cls), n))
 
-            if os.path.exists(os.path.join(server.image_folder, cls, name)):
-                raise HTTPException(status_code=409, detail='{} already exists'.format(os.path.join(cls, name)))
             if not os.path.exists(os.path.join(server.image_folder, cls)):
                 os.makedirs(os.path.join(server.image_folder, cls))
-            img = Image.open(BytesIO(zf.read(n)))
-            img.save(os.path.join(server.image_folder, cls, name), 'PNG')
     else:
         for n in name_list:
             count = n.count('/')
             if count != 0:
                 raise HTTPException(status_code=422, detail='Format of zipfile not respected')
             name = n[: n.rfind('.')] + '.png'
-            name_list_bis.append(name)
-
-            if not os.path.exists(os.path.join(server.image_folder, n)):
-                img = Image.open(BytesIO(zf.read(n)))
-                img.save(os.path.join(server.image_folder, name), 'PNG')
-            else:
-                raise HTTPException(status_code=409, detail='{} already exists'.format(n))
+            name_list_bis.append((server.image_folder, n))
 
     batch_size = 128
-    data = dataset.AddDatasetList(server.image_folder, name_list_bis, not server.database.feat_extract)
-    loader = torch.utils.data.DataLoader(data, batch_size=batch_size, pin_memory=True)
+    num_batches = len(name_list_bis) // batch_size
     with torch.no_grad():
-        for batch, n in loader:
-            async with lock:
-                batch = batch.view(-1, 3, 224, 224).to(device=next(server.model.parameters()).device)
+        for i in range(num_batches+1):
+            if i == num_batches:
+                names = name_list_bis[i*batch_size:]
+            else:
+                names = name_list_bis[i*batch_size: (i + 1)*batch_size]
+            async with await lock.gen_wlock():
+                id = int(server.database.r.get('last_id_{}'.format('labeled' if labeled else 'unlabeled')).decode('utf-8'))
+                data = dataset.AddDatasetList(id, names, not server.database.feat_extract)
+                for name, n in names:
+                    img = Image.open(BytesIO(zf.read(n)))
+                    img.save(os.path.join(name, str(id)) + '.png', 'PNG')
+                    id += 1
+                loader = torch.utils.data.DataLoader(data, batch_size=batch_size, pin_memory=True)
+                for batch, n in loader:
+                    batch = batch.view(-1, 3, 224, 224).to(device=next(server.model.parameters()).device)
 
-                out = server.model(batch).cpu()
+                    out = server.model(batch).cpu()
 
-                server.database.add(out.numpy(), list(n), labeled)
+                    server.database.add(out.numpy(), list(n), labeled)
 
-                server.database.save()
+                    server.database.save()
 
     return
 
 @app.get('/remove_image')
-async def remove_image(name: str):
+async def remove_image(name: str, public_key: str, private_key: str):
+    with Cytomine(host=server.host, public_key=public_key, private_key=private_key):
+        user = CurrentUser().fetch()
+        if user is False:
+            raise HTTPException(401, 'Unauthorized')
+
     do_have = os.path.exists(name)
     if do_have is False:
         return
     else:
-        async with lock:
+        async with await lock.gen_wlock():
             server.database.remove(name)
 
 @app.get('/heartbeat')
 def heartbeat():
-    return {'nbr_images': server.database.index_labeled.ntotal + server.database.index_unlabeled.ntotal}
+    return {'nbr_images_labeled': server.database.index_labeled.ntotal,
+            'nbr_images_unlabeled': server.database.index_unlabeled.ntotal}
 
 class CytomineImage(BaseModel):
     id: int
@@ -313,18 +352,21 @@ class CytomineImage(BaseModel):
     originalFilename: str
 
 @app.get('/add_slide')
-async def add_slide(client_pub_key: str, client_pri_key: str, image_params: CytomineImage):
-    with Cytomine(host='https://research.cytomine.be/', public_key=client_pub_key, private_key=client_pri_key):
-        if image_params.filename != 'CMU-1.svs':
-            return
+async def add_slide(public_key: str, private_key: str, image_params: CytomineImage):
+    with Cytomine(host=server.host, public_key=public_key, private_key=private_key):
+        user = CurrentUser().fetch()
+        if user is False:
+            raise HTTPException(401, 'Unauthorized')
         im = ImageInstance()
         im.id = image_params.id
         im.width, im.height = image_params.width, image_params.height
         im.resolution = image_params.resolution
         im.magnification = image_params.magnification
         im.filename, im.originalFilename = image_params.filename, image_params.originalFilename
-        # im.download(os.path.join(str(image_params.project), '{originalFilename}'))
+        # await loop.run_in_executor(
+            # server.pool, im.download, os.path.join(str(image_params.project), '{originalFilename}'))
 
+    loop = asyncio.get_running_loop()
     slide = OpenSlide(os.path.join(str(image_params.project), image_params.originalFilename))
     slide.get_thumbnail((512, 512))
 
@@ -341,60 +383,61 @@ async def add_slide(client_pub_key: str, client_pri_key: str, image_params: Cyto
         data = torch.utils.data.DataLoader(data, 128, pin_memory=True)
 
         for i, image in enumerate(data):
-            image = image.to(device=server.model.device)
-            outs[128 * i: (i+1) * 128, :] = server.model(image).cpu().numpy()
+            image = await loop.run_in_executor(
+                server.pool, image.to, server.model.device)
+            outs[128 * i: (i+1) * 128, :] = (await loop.run_in_executor(
+                server.pool, server.model, image)).cpu().numpy()
 
-    k = KMeans(500).fit(outs)
+    k = await loop.run_in_executor(server.pool, KMeans(500).fit, outs)
 
     name_list = []
     idx_list = []
 
-    for i in range(500):
-        idx = np.where(k.labels_ == i)[0]
-        idx_tmp = np.absolute(outs[k.labels_ == i] - k.cluster_centers_[i]).sum(axis=1).argmin()
-        idx_list.append(idx[idx_tmp])
+    async with await lock.gen_wlock():
+        id = int(server.database.r.get('last_id_unlabeled').decode('utf-8'))
+        for i in range(500):
+            idx = np.where(k.labels_ == i)[0]
+            idx_tmp = np.absolute(outs[k.labels_ == i] - k.cluster_centers_[i]).sum(axis=1).argmin()
+            idx_list.append(idx[idx_tmp])
 
-        if idx[idx_tmp] >= patches.shape[0]:
-            img = slide.read_region((patches[idx[idx_tmp]-patches.shape[0], 1] * 224,
-                                     patches[idx[idx_tmp]-patches.shape[0], 0] * 224), 0, (224, 224)).convert('RGB')
-        else:
-            img = slide.read_region((patches[idx[idx_tmp], 1] * 224,
-                                     patches[idx[idx_tmp], 0] * 224), 0, (224, 224)).convert('RGB')
-        name = im.filename[: im.filename.find('.')]
-        if idx[idx_tmp] >= patches.shape[0]:
-            name = os.path.join(server.image_folder, name + '_{}_{}_mag.png'.format(patches[idx[idx_tmp]-patches.shape[0], 1] * 224,
-                                                                                patches[idx[idx_tmp]-patches.shape[0], 0] * 224))
-        else:
-            name = os.path.join(server.image_folder, name + '_{}_{}.png'.format(patches[idx[idx_tmp], 1] * 224,
-                                                                                patches[idx[idx_tmp], 0] * 224))
-        if not os.path.exists(os.path.join(server.image_folder, name)):
+            if idx[idx_tmp] >= patches.shape[0]:
+                img = slide.read_region((patches[idx[idx_tmp]-patches.shape[0], 1] * 224,
+                                         patches[idx[idx_tmp]-patches.shape[0], 0] * 224), 0, (224, 224)).convert('RGB')
+            else:
+                img = slide.read_region((patches[idx[idx_tmp], 1] * 224,
+                                         patches[idx[idx_tmp], 0] * 224), 0, (224, 224)).convert('RGB')
+
+            name = os.path.join(server.image_folder, '{}.png'.format(id))
+
             img.save(name, 'PNG')
             name_list.append(name)
+            id += 1
+        class ds(torch.utils.data.Dataset):
+            def __init__(self, vectors, name_list, root):
+                self.root = root
+                self.vectors = vectors
+                self.name_list = name_list
+            def __len__(self):
+                return len(self.name_list)
+            def __getitem__(self, key):
+                return self.vectors[key, :], os.path.join(self.name_list[key])
 
-    class ds(torch.utils.data.Dataset):
-        def __init__(self, vectors, name_list, root):
-            self.root = root
-            self.vectors = vectors
-            self.name_list = name_list
-        def __len__(self):
-            return len(self.name_list)
-        def __getitem__(self, key):
-            return self.vectors[key, :], os.path.join(self.name_list[key])
-
-    with torch.no_grad():
-        outs = outs[idx_list, :]
-        data = ds(outs, name_list, server.image_folder)
-        data = torch.utils.data.DataLoader(data, 128, pin_memory=True)
-        for i, (vectors, names) in enumerate(data):
-            async with lock:
+        with torch.no_grad():
+            outs = outs[idx_list, :]
+            data = ds(outs, name_list, server.image_folder)
+            data = torch.utils.data.DataLoader(data, 128, pin_memory=True)
+            for i, (vectors, names) in enumerate(data):
                 server.database.add(vectors.numpy().astype(np.float32), names, False)
                 server.database.save()
 
     return
 
 @app.get('/add_slide_annotations')
-async def add_slide_annotations(client_pub_key: str, client_pri_key: str, project_id: int, term: str):
-    with Cytomine(host='https://research.cytomine.be/', public_key=client_pub_key, private_key=client_pri_key):
+async def add_slide_annotations(public_key: str, private_key: str, project_id: int, term: str):
+    with Cytomine(host=server.host, public_key=public_key, private_key=private_key):
+        user = CurrentUser().fetch()
+        if user is False:
+            raise HTTPException(401, 'Unauthorised')
         terms = TermCollection().fetch_with_filter('project', project_id)
         term_id = None
         for t in terms:
@@ -418,21 +461,22 @@ async def add_slide_annotations(client_pub_key: str, client_pri_key: str, projec
         for annotation in annotations:
             if term_id in annotation.term and annotation.area >= 700 and annotation.area < 5000:
                 name = os.path.join(term, '{}.jpg'.format(annotation.id))
-                annotation.dump(os.path.join(server.image_folder, name))
+                await loop.run_in_executor(
+                    server.pool, annotation.dump, os.path.join(server.image_folder, name))
                 image_names.append(name)
 
-        batch_size = 128
-        data = dataset.AddDatasetList(server.image_folder, image_names, not server.database.feat_extract)
-        loader = torch.utils.data.DataLoader(data, batch_size=batch_size, pin_memory=True)
-        with torch.no_grad():
-            for batch, n in loader:
-                async with lock:
-                    batch = batch.view(-1, 3, 224, 224).to(device=next(server.model.parameters()).device)
+    batch_size = 128
+    data = dataset.AddDatasetList(server.image_folder, image_names, not server.database.feat_extract)
+    loader = torch.utils.data.DataLoader(data, batch_size=batch_size, pin_memory=True)
+    with torch.no_grad():
+        for batch, n in loader:
+            async with await lock.gen_wlock():
+                batch = batch.view(-1, 3, 224, 224).to(device=next(server.model.parameters()).device)
 
-                    out = server.model(batch).cpu()
+                out = server.model(batch).cpu()
 
-                    server.database.add(out.numpy(), list(n), True)
-                    server.database.save()
+                server.database.add(out.numpy(), list(n), True)
+                server.database.save()
     return
 
 if __name__ == '__main__':

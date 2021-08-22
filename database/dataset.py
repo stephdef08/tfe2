@@ -192,8 +192,7 @@ class AddDataset(Dataset):
         return self.feature_extractor(images=img, return_tensors='pt')['pixel_values'], self.list_img[idx]
 
 class AddDatasetList(Dataset):
-    def __init__(self, root, name_list, transformer=False):
-        self.root = root
+    def __init__(self, id, name_list, transformer=False):
         self.list_img = []
         self.transform = transforms.Compose(
             [
@@ -212,20 +211,22 @@ class AddDatasetList(Dataset):
                                                                       size=224, do_center_crop=False,
                                                                       image_mean=[0.485, 0.456, 0.406],
                                                                       image_std=[0.229, 0.224, 0.225])
+        self.id = id
 
         for n in name_list:
-            self.list_img.append(os.path.join(root, n))
+            self.list_img.append(n[0])
 
     def __len__(self):
         return len(self.list_img)
 
     def __getitem__(self, idx):
-        img = Image.open(self.list_img[idx]).convert('RGB')
+        img = Image.open(os.path.join(self.list_img[idx], str(idx+self.id) + '.png')).convert('RGB')
 
         if not self.transformer:
-            return self.transform(img), self.list_img[idx]
+            return self.transform(img), os.path.join(self.list_img[idx], str(idx+self.id)  + '.png')
 
-        return self.feature_extractor(images=img, return_tensors='pt')['pixel_values'], self.list_img[idx]
+        return self.feature_extractor(images=img, return_tensors='pt')['pixel_values'], os.path.join(
+            self.list_img[idx], str(idx+self.id)  + '.png')
 
 class AddSlide(Dataset):
     def __init__(self, patches, slide):
