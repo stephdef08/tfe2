@@ -125,4 +125,4 @@ python rest/server.py [arguments]
 - --db_name (default: db): name of the database
 - --server_name (required): name of the server
 
-The REST API can be tested with FastAPI documentation, by going at the address `[http|https]://master_pi:master_port/docs`
+The REST API can be tested with FastAPI documentation, by going at the address `[http|https]://master_ip:master_port/docs`
