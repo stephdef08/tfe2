@@ -265,7 +265,8 @@ if __name__ == "__main__":
 
     parser.add_argument(
         '--scheduler',
-        default=None
+        default=None,
+        help='<exponential, step>'
     )
 
     parser.add_argument(

@@ -6,7 +6,6 @@ from PIL import Image
 from torchvision import transforms
 import redis
 import numpy as np
-from transformers import ViTFeatureExtractor
 from transformers import DeiTFeatureExtractor
 import time
 import json

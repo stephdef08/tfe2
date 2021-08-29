@@ -170,7 +170,7 @@ async def nearest_images(nrt_neigh: int, client_pub_key: str='', only_labeled: s
             'names': [n for sublist in names for n in sublist],
             'distances': [float(distances[l, 0]) for l in list(labels[0])]}
 
-@app.post('/put_image')
+@app.post('/index_image')
 async def put_image(client_pub_key: str, client_pri_key: str, image: UploadFile=File(...), label: str=''):
     with Cytomine(host=master.host, public_key=client_pub_key, private_key=client_pri_key):
         user = CurrentUser().fetch()
@@ -202,7 +202,7 @@ async def put_image(client_pub_key: str, client_pri_key: str, image: UploadFile=
                 if ip_list == []:
                     raise HTTPException(status_code=500, detail='No server alive')
 
-@app.post('/put_folder')
+@app.post('/index_folder')
 async def put_folder(client_pub_key: str, client_pri_key: str, labeled: bool, folder: UploadFile=File(...)):
     with Cytomine(host=master.host, public_key=client_pub_key, private_key=client_pri_key):
         user = CurrentUser().fetch()
@@ -256,7 +256,7 @@ async def remove_image(client_pub_key: str, client_pri_key: str, name: str):
             except Exception as e:
                 pass
 
-@app.get('/add_slides')
+@app.get('/index_slides')
 async def add_slides(client_pub_key: str, client_pri_key: str, project_id: str):
     with Cytomine(host=master.host, public_key=client_pub_key, private_key=client_pri_key):
         user = CurrentUser().fetch()
@@ -286,7 +286,7 @@ async def add_slides(client_pub_key: str, client_pri_key: str, project_id: str):
 
 
 
-@app.get('/add_slide_annotations')
+@app.get('/index_slide_annotations')
 async def add_slides_annotations(client_pub_key: str, client_pri_key: str, project_id: str, label: str):
     with Cytomine(host=master.host, public_key=client_pub_key, private_key=client_pri_key):
         user = CurrentUser().fetch()

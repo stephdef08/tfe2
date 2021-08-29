@@ -1,0 +1,20 @@
+pytorch with cuda support
+pillow
+torchvision
+numpy
+transformers
+faiss
+redis-py
+scikit-learn
+pandas
+seaborn
+matplotlib
+fastapi
+uvicorn
+aiohttp
+requests
+cytomine
+python-multipart
+openslide
+opencv
+readerwriterlock

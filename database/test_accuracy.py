@@ -31,7 +31,7 @@ class TestDataset(Dataset):
         classes_tmp = []
 
         if generalise:
-            classes = classes[:len(classes) // 2 + 1]
+            classes = classes[len(classes) // 2:]
 
         self.conversion = {x: i for i, x in enumerate(classes)}
 
