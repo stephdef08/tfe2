@@ -6,6 +6,7 @@ parts of codes are taken from:
 
 The required libraries are in the file requirements.txt
 
+## Training a new model
 To train a new model launch the script `database/models.py`
 
 ```bash
@@ -26,3 +27,26 @@ The following arguments can be given in the command line:
 -  --freeze: freeze the weights of the model during training (not for the last layer and the shallow convolutional networks)
 -  --generalise: train on only half the classes
 -  --lr, --decay, --beta_lr, --gamma, --lr_proxies: parameters related to the training
+
+The folder that contains the training images should be organised as follows:
+```
+folder
+|------ class1:
+          |------ image1
+          |------ image2
+          |------ ...
+|------ class2:
+          |------ image1
+          |------ image2
+          |------ ..
+|------ ...
+```
+
+## Adding images to the database
+```bash
+redis-server
+python database/add_images [arguments]
+```
+
+The following arguments can be given in the command line:
+- --path: 
