@@ -15,9 +15,7 @@ class ImageRetriever:
         return self.db.search(image, nrt_neigh)[0]
 
 if __name__ == "__main__":
-    usage = "python3 add_images.py --path <image_name> [--extractor <algorithm> --db_name <name> --num_features <num>]"
-
-    parser = ArgumentParser(usage)
+    parser = ArgumentParser()
 
     parser.add_argument(
         '--path',

@@ -6,9 +6,7 @@ import time
 import os
 
 if __name__ == "__main__":
-    usage = "python3 add_images.py --path <folder> [--extractor <algorithm> --db_name <name> --num_features <num>]"
-
-    parser = ArgumentParser(usage)
+    parser = ArgumentParser()
 
     parser.add_argument(
         '--path',
