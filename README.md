@@ -6,4 +6,8 @@ parts of codes are taken from:
 
 The required libraries are in the file requirements.txt
 
-To train a new model launch the script `database/model.py`
+To train a new model launch the script `database/models.py`
+
+```bash
+python database/models.py [arguments]
+```
