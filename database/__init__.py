@@ -1,3 +1,3 @@
 from database import db
-from database import densenet
+from database import models
 from database import transformer

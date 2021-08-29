@@ -11,7 +11,6 @@ from torch import nn
 class Model(torch.nn.Module):
     def __init__(self, num_features=128, batch_size=32, name='weights', eval=True, device='cuda:0'):
         super(Model, self).__init__()
-        # self.model = ViTForImageClassification.from_pretrained('google/vit-base-patch16-224')
         self.model = DeiTForImageClassification.from_pretrained('facebook/deit-base-distilled-patch16-224')
 
         for param in self.model.parameters():
@@ -73,7 +72,7 @@ class Model(torch.nn.Module):
             lr = 0.0001
             decay = 0.0004
             lr_proxies = .00001
-            gamma = 0.9
+            gamma = 0.3
             loss_function = NormSoftmax(0.05, len(data.classes), self.num_features, lr_proxies, self.device)
 
             to_optim = [

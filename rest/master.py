@@ -81,7 +81,11 @@ if __name__ != '__main__':
     lock = defaultdict(lambda: asyncio.Lock())
 
 def sort_ips(ip_list, labeled):
-    ip_list.sort(key = lambda k: k[1][0 if labeled else 1])
+    if labeled:
+        ip_list.sort(key = lambda k: k[1][0])
+    else:
+        ip_list.sort(key = lambda k: k[1][1])
+
     return [i for i, j in ip_list]
 
 @app.get('/connect')
@@ -116,7 +120,7 @@ async def nearest_images(nrt_neigh: int, client_pub_key: str='', only_labeled: s
                                             params={'nrt_neigh': nrt_neigh, 'public_key': client_pub_key,
                                                     'private_key': client_pri_key},
                                             headers={'Content-Encoding': 'gzip'},
-                                            timeout=aiohttp.ClientTimeout(5)) as resp:
+                                            timeout=aiohttp.ClientTimeout(100)) as resp:
                         responses.append(await resp.json())
                 except Exception as e:
                     print(e)
@@ -143,25 +147,28 @@ async def nearest_images(nrt_neigh: int, client_pub_key: str='', only_labeled: s
 
         images = []
         cls = []
+        names = []
         async with aiohttp.ClientSession(trust_env=True) as session:
-            for ip, labels in zip(ip_list, to_retrieve.values()):
-                if labels != []:
+            for ip, lbls in zip(ip_list, to_retrieve.values()):
+                if lbls != []:
                     try:
                         async with session.get('{}://{}/retrieve_images/{}'.format(master.http, ip, only_labeled),
                                                params={'public_key': client_pub_key, 'private_key': client_pri_key},
-                                               json={'labels': list(labels)},
-                                               timeout=aiohttp.ClientTimeout(5)) as resp:
+                                               json={'labels': list(lbls)},
+                                               timeout=aiohttp.ClientTimeout(100)) as resp:
                             images.append((await resp.json())['images'])
                             cls.append((await resp.json())['cls'])
+                            names.append((await resp.json())['names'])
 
                     except Exception as e:
                         pass
-
     if images == []:
         raise HTTPException(status_code=500, detail='No server alive')
 
     return {'images': [i for sublist in images for i in sublist],
-            'cls': [c for sublist in cls for c in sublist]}
+            'cls': [c for sublist in cls for c in sublist],
+            'names': [n for sublist in names for n in sublist],
+            'distances': [float(distances[l, 0]) for l in list(labels[0])]}
 
 @app.post('/put_image')
 async def put_image(client_pub_key: str, client_pri_key: str, image: UploadFile=File(...), label: str=''):
@@ -170,10 +177,10 @@ async def put_image(client_pub_key: str, client_pri_key: str, image: UploadFile=
         if user is False:
             raise HTTPException(401, 'Unauthorized')
     content = await image.read()
-
     ip_list = sort_ips(list(master.servers.items()), label != '')
     while True:
         ip = ip_list.pop(0)
+
         async with aiohttp.ClientSession(trust_env=True) as session:
             try:
                 data = aiohttp.FormData()
@@ -183,13 +190,14 @@ async def put_image(client_pub_key: str, client_pri_key: str, image: UploadFile=
                                         params={'label': label, 'public_key': client_pub_key,
                                                 'private_key': client_pri_key},
                                         headers={'Content-Encoding': 'gzip'},
-                                        timeout=aiohttp.ClientTimeout(5)) as resp:
+                                        timeout=aiohttp.ClientTimeout(100)) as resp:
                     status = resp.status
                     if status == 409 or status == 422:
                         raise HTTPException(status_code=status, detail= await resp.json()['detail'])
                     if status != 200 and ip_list == []:
                         raise HTTPException(status_code=500, detail='No server alive')
-                    break
+                    if status == 200:
+                        break
             except Exception as e:
                 if ip_list == []:
                     raise HTTPException(status_code=500, detail='No server alive')
@@ -203,6 +211,7 @@ async def put_folder(client_pub_key: str, client_pri_key: str, labeled: bool, fo
     content = await folder.read()
 
     ip_list = sort_ips(list(master.servers.items()), labeled)
+    print(ip_list)
     while True:
         ip = ip_list.pop(0)
         async with aiohttp.ClientSession(trust_env=True) as session:
@@ -216,11 +225,12 @@ async def put_folder(client_pub_key: str, client_pri_key: str, labeled: bool, fo
                                         headers={'Content-Encoding': 'gzip'},
                                         timeout=aiohttp.ClientTimeout(5)) as resp:
                     status = resp.status
-                    if status == 409 or status == 422:
+                    if status == 409 or status == 422 or status == 401:
                         raise HTTPException(status_code=status, detail= (await resp.json())['detail'])
                     if status != 200 and ip_list == []:
                         raise HTTPException(status_code=500, detail='No server alive')
-                    break
+                    if status == 200:
+                        break
             except HTTPException as h:
                 raise HTTPException(h.status_code, h.detail)
             except Exception as e:
@@ -255,25 +265,24 @@ async def add_slides(client_pub_key: str, client_pri_key: str, project_id: str):
         image_instances = ImageInstanceCollection().fetch_with_filter("project", project_id)
 
     for image in image_instances:
-        if image.filename == 'CMU-1.svs':
-            ip_list = sort_ips(list(master.servers.items()), False)
-            while True:
-                ip = ip_list.pop()
-                async with aiohttp.ClientSession(trust_env=True) as session:
-                    try:
-                        await session.get('{}://{}/add_slide'.format(master.http, ip),
-                                          params={'public_key': client_pub_key,
-                                                  'private_key': client_pri_key},
-                                          json={'id': image.id, 'width':image.width, 'project': project_id,
-                                                'height': image.height, 'resolution': image.resolution,
-                                                'magnification': image.magnification,
-                                                'filename': image.filename, 'originalFilename': image.filename},
-                                          timeout=aiohttp.ClientTimeout(300))
-                        break
-                    except Exception as e:
-                        print(e)
-                        if ip_list == []:
-                            raise HTTPException(status_code=500, detail='No server alive')
+        ip_list = sort_ips(list(master.servers.items()), False)
+        while True:
+            ip = ip_list.pop()
+            async with aiohttp.ClientSession(trust_env=True) as session:
+                try:
+                    await session.get('{}://{}/add_slide'.format(master.http, ip),
+                                      params={'public_key': client_pub_key,
+                                              'private_key': client_pri_key},
+                                      json={'id': image.id, 'width':image.width, 'project': project_id,
+                                            'height': image.height, 'resolution': image.resolution,
+                                            'magnification': image.magnification,
+                                            'filename': image.filename, 'originalFilename': image.filename},
+                                      timeout=aiohttp.ClientTimeout(300))
+                    break
+                except Exception as e:
+                    print(e)
+                    if ip_list == []:
+                        raise HTTPException(status_code=500, detail='No server alive')
 
 
 

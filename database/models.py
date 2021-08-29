@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torchvision import transforms
+from transformers import DeiTForImageClassification
 import database.dataset as dataset
 import numpy as np
 import time
@@ -12,28 +13,32 @@ from argparse import ArgumentParser, ArgumentTypeError
 
 class Model(nn.Module):
     def __init__(self, model='densenet', eval=True, batch_size=32, num_features=128,
-                 name='weights', use_dr=True, device='cuda:0', attention=False):
+                 name='weights', use_dr=True, device='cuda:0', freeze=False):
         super(Model, self).__init__()
         if model == 'densenet':
+            self.forward_function = self.forward_conv
             self.conv_net = models.densenet121(pretrained=True).to(device=device)
         elif model == 'resnet':
+            self.forward_function = self.forward_conv
             self.conv_net = models.resnet50(pretrained=True).to(device=device)
+        elif model == 'transformer':
+            self.forward_function = self.forward_transformer
+            self.model = DeiTForImageClassification.from_pretrained('facebook/deit-base-distilled-patch16-224').to(device=device)
 
-        for param in self.conv_net.parameters():
-            param.requires_grad = False
+        if freeze and model != 'transformer':
+            for param in self.conv_net.parameters():
+                param.requires_grad = False
+        elif freeze:
+            for param in self.model.parameters():
+                param.requires_grad = False
 
-        out_features = 4096 if use_dr else num_features
-        if model == 'densenet':
-            self.conv_net.classifier = nn.Linear(1024, out_features).to(device=device)
-        elif model == 'resnet':
-            self.conv_net.fc = nn.Linear(2048, out_features).to(device=device)
+        if use_dr and model != 'transformer':
+            out_features = 4096
+            if model == 'densenet':
+                self.conv_net.classifier = nn.Linear(1024, out_features).to(device=device)
+            elif model == 'resnet':
+                self.conv_net.fc = nn.Linear(2048, out_features).to(device=device)
 
-        # self.relu = nn.LeakyReLU().to(device=device)
-
-        if attention:
-            self.att_layer = torch.nn.MultiheadAttention(out_features, 1).to(device=device)
-
-        if use_dr:
             self.first_conv1 = nn.Conv2d(3, 96, kernel_size=8, padding=1, stride=16).to(device=device)
             self.first_conv2 = nn.MaxPool2d(3, 4, 1).to(device=device)
 
@@ -41,11 +46,23 @@ class Model(nn.Module):
             self.second_conv2 = nn.MaxPool2d(7, 2, 3).to(device=device)
 
             self.linear = nn.Linear(7168, num_features).to(device=device)
+            self.use_dr = True
+        else:
+            if model == 'densenet':
+                self.conv_net.classifier = nn.Linear(1024, num_features).to(device=device)
+            elif model == 'resnet':
+                self.conv_net.fc = nn.Linear(2048, num_features).to(device=device)
+            elif model == 'transformer':
+                self.model.classifier = torch.nn.Linear(768, num_features).to(device=device)
+                for module in filter(lambda m: type(m) == nn.LayerNorm, self.model.modules()):
+                    module.eval()
+                    module.train = lambda _: None
+            self.use_dr = False
 
         self.num_features = num_features
-        self.use_dr = use_dr
-        self.attention = attention
         self.norm = nn.functional.normalize
+
+        self.transformer = model == 'transformer'
 
         self.name = name
         self.device = device
@@ -59,15 +76,9 @@ class Model(nn.Module):
             self.eval = False
             self.batch_size = batch_size
 
-
-    def forward(self, input):
+    def forward_conv(self, input):
         tensor1 = self.conv_net(input)
 
-        if self.attention:
-            tensor1 = tensor1.unsqueeze(0)
-            tensor1 = self.att_layer(tensor1, tensor1, tensor1)[0].view((-1, self.num_features))
-
-        # tensor1 = self.norm(self.relu(tensor1))
         tensor1 = self.norm(tensor1)
 
         if self.use_dr:
@@ -85,26 +96,24 @@ class Model(nn.Module):
 
         return tensor1
 
-    def train_epochs(self, dir, epochs, sched, alan, reguliser, loss):
-        data = dataset.DRDataset(dir, 2, alan)
-        print(data.__len__())
+    def forward_transformer(self, input):
+        return self.norm(self.model(input).logits, 1)
+
+    def forward(self, input):
+        return self.forward_function(input)
+
+    def train_epochs(self, dir, epochs, sched, loss, generalise, lr, decay, beta_lr, gamma, lr_proxies):
+        data = dataset.TrainingDataset(dir, 2, generalise, self.transformer)
+        print('Size of dataset', data.__len__())
 
         if loss == 'margin':
-            lr = 0.0001
-            decay = 0.0004
-            beta_lr = 0.0005
-            gamma = 0.3
-            loss_function = MarginLoss(n_classes=len(data.classes), reguliser=reguliser)
+            loss_function = MarginLoss(n_classes=len(data.classes))
 
             to_optim = [{'params':self.parameters(),'lr':lr,'weight_decay':decay},
                         {'params':loss_function.parameters(), 'lr':beta_lr, 'weight_decay':0}]
 
             optimizer = torch.optim.Adam(to_optim)
         elif loss == 'proxy_nca_pp':
-            lr_model = 4e-3
-            lr_proxies = 4e2
-            gamma = 0.3
-
             loss_function = ProxyNCA_prob(len(data.classes), self.num_features, 3, device)
 
             to_optim = [
@@ -112,12 +121,8 @@ class Model(nn.Module):
                 {'params':loss_function.parameters(), 'lr': lr_proxies},
             ]
 
-            optimizer = torch.optim.Adam(to_optim, lr=lr_model, eps=1)
+            optimizer = torch.optim.Adam(to_optim, lr=lr, eps=1)
         elif loss == 'softmax':
-            lr = 0.0001
-            decay = 0.0004
-            lr_proxies = .00001
-            gamma = 0.3
             loss_function = NormSoftmax(0.05, len(data.classes), self.num_features, lr_proxies, self.device)
 
             to_optim = [
@@ -146,7 +151,10 @@ class Model(nn.Module):
                     images_gpu = images.to(device=self.device)
                     labels = labels.to(device=self.device)
 
-                    out = self.forward(images_gpu)
+                    if not self.transformer:
+                        out = self.forward(images_gpu)
+                    else:
+                        out = self.forward(images_gpu.view(-1, 3, 224, 224))
 
                     loss = loss_function(out, labels)
 
@@ -155,10 +163,6 @@ class Model(nn.Module):
                     optimizer.step()
 
                     loss_list.append(loss.item())
-
-                    if i % 100 == 0:
-                        print("epoch {}, batch {}, loss = {}".format(epoch, i,
-                                                                     np.mean(loss_list)))
 
                 print("epoch {}, loss = {}, time {}".format(epoch, np.mean(loss_list),
                                                             time.time() - start_time))
@@ -169,6 +173,51 @@ class Model(nn.Module):
 
                 torch.save(self.state_dict(), self.name)
 
+        except KeyboardInterrupt:
+            print("Interrupted")
+
+    def train_dr(self, data, num_epochs, lr):
+        data = dataset.DRDataset(data)
+        print('Size of dataset', data.__len__())
+
+        loader = torch.utils.data.DataLoader(data, batch_size=self.batch_size,
+                                             shuffle=True, num_workers=12,
+                                             pin_memory=True)
+        loss_function = torch.nn.TripletMarginLoss()
+        optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+        loss_list = []
+        try:
+            for epoch in range(num_epochs):
+                start_time = time.time()
+
+                for i, (image0, image1, image2) in enumerate(loader):
+                    image0 = image0.to(device='cuda:0')
+                    image1 = image1.to(device='cuda:0')
+                    image2 = image2.to(device='cuda:0')
+
+                    out0 = self.forward(image0).cpu()
+                    out1 = self.forward(image1).cpu()
+                    out2 = self.forward(image2).cpu()
+
+                    loss = loss_function(out0, out1, out2)
+
+                    optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
+                    optimizer.step()
+
+                    loss_list.append(loss.item())
+
+                print("epoch {}, batch {}, loss = {}".format(epoch, i,
+                                                             np.mean(loss_list)))
+                loss_list.clear()
+                print("time for epoch {}".format(time.time()- start_time))
+
+                torch.save(self.state_dict(), self.name)
+
+                if (epoch + 1) % 4:
+                    lr /= 2
+                    for param in optimizer.param_groups:
+                        param['lr'] = lr
         except KeyboardInterrupt:
             print("Interrupted")
 
@@ -195,7 +244,7 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        '--file_name',
+        '--weights',
         default='weights'
     )
 
@@ -220,29 +269,56 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        '--attention',
-        action='store_true'
-    )
-
-    parser.add_argument(
-        '--alan',
-        action='store_true'
-    )
-
-    parser.add_argument(
         '--gpu_id',
         default=0,
         type=int
     )
 
     parser.add_argument(
-        '--reguliser',
-        default='contrastive_p'
+        '--loss',
+        default='margin',
+        help='<margin, proxy_nca_pp, softmax, deep_ranking>'
     )
 
     parser.add_argument(
-        '--loss',
-        default='margin'
+        '--freeze',
+        action='store_true'
+    )
+
+    parser.add_argument(
+        '--generalise',
+        action='store_true',
+        help='train on only half the classes of images'
+    )
+
+    parser.add_argument(
+        '--lr',
+        default=0.0001,
+        type=float
+    )
+
+    parser.add_argument(
+        '--decay',
+        default=0.0004,
+        type=float
+    )
+
+    parser.add_argument(
+        '--beta_lr',
+        default=0.0005,
+        type=float
+    )
+
+    parser.add_argument(
+        '--gamma',
+        default=0.3,
+        type=float
+    )
+
+    parser.add_argument(
+        '--lr_proxies',
+        default=0.00001,
+        type=float
     )
 
     args = parser.parse_args()
@@ -253,7 +329,11 @@ if __name__ == "__main__":
         device = 'cpu'
 
     m = Model(model=args.model, eval=False, batch_size=args.batch_size,
-              num_features=args.num_features, name=args.file_name,
-              use_dr=args.dr_model, attention=args.attention, device=device)
+              num_features=args.num_features, name=args.weights,
+              use_dr=args.dr_model, device=device, freeze=args.freeze)
 
-    m.train_epochs(args.training_data, args.num_epochs, args.scheduler, args.alan, args.reguliser, args.loss)
+    if args.loss == 'deep_ranking':
+        m.train_dr(args.training_data, args.num_epochs, args.lr)
+    else:
+        m.train_epochs(args.training_data, args.num_epochs, args.scheduler, args.loss, args.generalise,
+                       args.lr, args.decay, args.beta_lr, args.gamma, args.lr_proxies)

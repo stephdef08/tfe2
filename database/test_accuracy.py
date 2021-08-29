@@ -1,4 +1,4 @@
-from database.densenet import Model
+from database.models import Model
 import torch
 import database.db as db
 from PIL import Image
@@ -7,7 +7,6 @@ from collections import Counter, defaultdict
 from torch.utils.data import Dataset
 import os
 import numpy as np
-import database.transformer as transformer
 import sklearn
 import sklearn.metrics
 import pandas as pd
@@ -16,59 +15,54 @@ import matplotlib.pyplot as plt
 import time
 
 class TestDataset(Dataset):
-    def __init__(self, root='patch/val'):
+    def __init__(self, root, measure, generalise):
         self.root = root
 
         self.dic_img = defaultdict(list)
         self.img_list = []
 
-        name_list = ['janowczyk2_0', 'janowczyk2_1', 'lbpstroma_0', 'lbpstroma_1', 'patterns_no_aug_0', 'patterns_no_aug_1',
-                     'mitos2014_0', 'mitos2014_1', 'mitos2014_2', 'ulg_lbtd_lba0', 'ulg_lbtd_lba1', 'ulg_lbtd_lba2', 'ulg_lbtd_lba3',
-                     'ulg_lbtd_lba4', 'ulg_lbtd_lba5', 'ulg_lbtd_lba6', 'ulg_lbtd_lba7', 'iciar18_micro0', 'iciar18_micro1',
-                     'iciar18_micro2', 'iciar18_micro3', 'tupac_mitosis0', 'tupac_mitosis1', 'camelyon16_0', 'camelyon16_1',
-                     'umcm_colorectal_01', 'umcm_colorectal_02', 'umcm_colorectal_03', 'umcm_colorectal_04', 'umcm_colorectal_05',
-                     'umcm_colorectal_06', 'umcm_colorectal_07', 'umcm_colorectal_08', 'warwick_crc0']
-
         classes = os.listdir(root)
         classes = sorted(classes)
 
-        # classes.remove('camelyon16_0')
-        # classes.remove('janowczyk6_0')
-
-        # for n in name_list:
-        #     classes.remove(n)
+        if measure == 'remove':
+            classes.remove('camelyon16_0')
+            classes.remove('janowczyk6_0')
 
         classes_tmp = []
 
-        # classes = classes[:len(classes) // 2 + 1]
+        if generalise:
+            classes = classes[:len(classes) // 2 + 1]
 
         self.conversion = {x: i for i, x in enumerate(classes)}
 
-        for i in classes:
-            for img in os.listdir(os.path.join(root, str(i))):
-                self.dic_img[i].append(os.path.join(root, str(i), img))
-        #         self.img_list.append(os.path.join(root, str(i), img))
+        if measure != 'random':
+            for i in classes:
+                for img in os.listdir(os.path.join(root, str(i))):
+                    self.img_list.append(os.path.join(root, str(i), img))
+        else:
+            for i in classes:
+                for img in os.listdir(os.path.join(root, str(i))):
+                    self.dic_img[i].append(os.path.join(root, str(i), img))
 
+            nbr_empty = 0
+            to_delete = []
 
-        nbr_empty = 0
-        to_delete = []
+            while True:
+                for key in self.dic_img:
+                    if (not self.dic_img[key]) is False:
+                        img = np.random.choice(self.dic_img[key])
+                        self.dic_img[key].remove(img)
+                        self.img_list.append(img)
+                    else:
+                        to_delete.append(key)
 
-        while True:
-            for key in self.dic_img:
-                if (not self.dic_img[key]) is False:
-                    img = np.random.choice(self.dic_img[key])
-                    self.dic_img[key].remove(img)
-                    self.img_list.append(img)
-                else:
-                    to_delete.append(key)
+                for key in to_delete:
+                    self.dic_img.pop(key, None)
 
-            for key in to_delete:
-                self.dic_img.pop(key, None)
+                to_delete.clear()
 
-            to_delete.clear()
-
-            if len(self.img_list) > 1000 or len(self.dic_img) == 0:
-                break
+                if len(self.img_list) > 1000 or len(self.dic_img) == 0:
+                    break
 
     def __len__(self):
         return len(self.img_list)
@@ -76,10 +70,10 @@ class TestDataset(Dataset):
     def __getitem__(self, idx):
         return self.img_list[idx]
 
-def test(model, dataset, db_name, extractor):
+def test(model, dataset, db_name, extractor, measure, generalise):
     database = db.Database(db_name, model, True, extractor=='transformer')
 
-    data = TestDataset(dataset)
+    data = TestDataset(dataset, measure, generalise)
 
     loader = torch.utils.data.DataLoader(data, batch_size=1, shuffle=True,
                                          num_workers=4, pin_memory=True)
@@ -184,7 +178,7 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        '--file_name',
+        '--weights',
         help='file that contains the weights of the network',
         default='weights'
     )
@@ -195,14 +189,19 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        '--attention',
-        action='store_true'
-    )
-
-    parser.add_argument(
         '--gpu_id',
         default=0,
         type=int
+    )
+
+    parser.add_argument(
+        '--measure',
+        help='random samples from validation set <random>, remove camelyon16_0 and janowczyk6_0 <remove> or all <all>'
+    )
+
+    parser.add_argument(
+        '--generalise',
+        help='use only half the classes to compute the accuracy'
     )
 
     args = parser.parse_args()
@@ -216,10 +215,7 @@ if __name__ == "__main__":
         print('Path mentionned is not a folder')
         exit(-1)
 
-    if args.extractor != 'transformer':
-        model = Model(num_features=args.num_features, name=args.file_name, model=args.extractor,
-                      use_dr=args.dr_model, device=device, attention=args.attention)
-    else:
-        model = transformer.Model(num_features=args.num_features, name=args.file_name, device=device)
+    model = Model(num_features=args.num_features, name=args.weights, model=args.extractor,
+                  use_dr=args.dr_model, device=device)
 
-    test(model, args.path, args.db_name, args.extractor)
+    test(model, args.path, args.db_name, args.extractor, args.measure, args.generalise)

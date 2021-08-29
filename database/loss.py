@@ -4,10 +4,13 @@ import torch.nn.functional as F
 import sklearn
 import sklearn.preprocessing
 
+# https://github.com/Confusezius/Revisiting_Deep_Metric_Learning_PyTorch/blob/efddbf23ccbe267f055867b4e1c7c6693e2447c9/batchminer/rho_distance.py#L13
 def distanceweightedsampling(batch, labels, lower_cutoff=0.5, upper_cutoff=1.4, contrastive_p=.2):
     """
     This methods finds all available triplets in a batch given by the classes provided in labels, and select
     triplets based on distance sampling introduced in 'Sampling Matters in Deep Embedding Learning'.
+
+    Randomly swaps a positive sample with the negative sample for regularization.
 
     Args:
         batch:  np.ndarray or torch.Tensor, batch-wise embedded training samples.
@@ -21,8 +24,6 @@ def distanceweightedsampling(batch, labels, lower_cutoff=0.5, upper_cutoff=1.4, 
     bs = batch.shape[0]
 
     distances    = pdist(batch.detach()).clamp(min=lower_cutoff)
-
-
 
     positives, negatives = [],[]
     labels_visited = []
@@ -50,6 +51,7 @@ def distanceweightedsampling(batch, labels, lower_cutoff=0.5, upper_cutoff=1.4, 
     sampled_triplets = [[a,p,n] for a,p,n in zip(list(range(bs)), positives, negatives)]
     return sampled_triplets
 
+# https://github.com/Confusezius/Deep-Metric-Learning-Baselines/blob/60772745e28bc90077831bb4c9f07a233e602797/losses.py#L263
 def pdist(A):
         """
         Efficient function to compute the distance matrix for a matrix A.
@@ -65,6 +67,7 @@ def pdist(A):
         res = (norm + norm.t() - 2 * prod).clamp(min = 0)
         return res.clamp(min = 0).sqrt()
 
+# https://github.com/Confusezius/Revisiting_Deep_Metric_Learning_PyTorch/blob/efddbf23ccbe267f055867b4e1c7c6693e2447c9/batchminer/rho_distance.py#L50
 def inverse_sphere_distances(batch, dist, labels, anchor_label):
         """
         Function to utilise the distances of batch samples to compute their
@@ -96,20 +99,9 @@ def inverse_sphere_distances(batch, dist, labels, anchor_label):
         q_d_inv = q_d_inv/q_d_inv.sum()
         return q_d_inv.detach().cpu().numpy()
 
-def pairwise_NNs_inner(x):
-    """
-    Pairwise nearest neighbors for L2-normalized vectors.
-    Uses Torch rather than Faiss to remain on GPU.
-    """
-    # parwise dot products (= inverse distance)
-    dots = torch.mm(x, x.t())
-    n = x.shape[0]
-    dots.view(-1)[::(n+1)].fill_(-1)  # Trick to fill diagonal with -1
-    _, I = torch.max(dots, 1)  # max inner prod -> min distance
-    return I
-
+# https://github.com/Confusezius/Deep-Metric-Learning-Baselines/blob/60772745e28bc90077831bb4c9f07a233e602797/losses.py#L416
 class MarginLoss(torch.nn.Module):
-    def __init__(self, margin=0.2, nu=0, beta=1.2, n_classes=100, beta_constant=False, sampling_method='distance', reguliser='entropy'):
+    def __init__(self, margin=0.2, nu=0, beta=1.2, n_classes=100, beta_constant=False, sampling_method='distance'):
         """
         Basic Margin Loss as proposed in 'Sampling Matters in Deep Embedding Learning'.
 
@@ -134,13 +126,7 @@ class MarginLoss(torch.nn.Module):
         self.nu                 = nu
 
         self.sampling_method    = sampling_method
-        self.sampler            = lambda x, y : distanceweightedsampling(x, y,
-                                                                         0.2 if reguliser=='contrastive_p' else 0)
-
-        self.reguliser = reguliser
-
-        if reguliser == 'entropy':
-            self.pdist = torch.nn.PairwiseDistance(2)
+        self.sampler            = distanceweightedsampling
 
 
     def forward(self, batch, labels):
@@ -191,7 +177,7 @@ class MarginLoss(torch.nn.Module):
 
         return loss
 
-
+# https://github.com/euwern/proxynca_pp/blob/e2fd551d90ba62f62c722782234f03fabda50320/loss.py#L52
 class ProxyNCA_prob(torch.nn.Module):
     def __init__(self, nb_classes, sz_embed, scale, device):
         torch.nn.Module.__init__(self)
@@ -222,7 +208,7 @@ class ProxyNCA_prob(torch.nn.Module):
         loss = torch.sum(- T * F.log_softmax(-D, -1), -1)
         loss = loss.mean()
         return loss
-
+# https://github.com/euwern/proxynca_pp/blob/e2fd551d90ba62f62c722782234f03fabda50320/loss.py#L9
 def binarize_and_smooth_labels(T, nb_classes, smoothing_const = 0):
     device = T.device
     T = T.cpu().numpy()
@@ -235,6 +221,7 @@ def binarize_and_smooth_labels(T, nb_classes, smoothing_const = 0):
 
     return T
 
+# https://github.com/euwern/proxynca_pp/blob/e2fd551d90ba62f62c722782234f03fabda50320/similarity.py#L6
 def pairwise_distance(a, squared=False):
     """Computes the pairwise distance matrix with numerical stability."""
     pairwise_distances_squared = torch.add(
@@ -275,6 +262,8 @@ def pairwise_distance(a, squared=False):
 
     return pairwise_distances
 
+
+# https://github.com/Confusezius/Revisiting_Deep_Metric_Learning_PyTorch/blob/efddbf23ccbe267f055867b4e1c7c6693e2447c9/criteria/softmax.py#L12
 class NormSoftmax(torch.nn.Module):
     def __init__(self, temperature, n_classes, embed_dim, loss_softmax_lr, device):
         super(NormSoftmax, self).__init__()

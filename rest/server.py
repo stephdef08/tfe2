@@ -6,8 +6,7 @@ from io import BytesIO
 from io import StringIO
 import argparse
 from database.db import Database
-from database.densenet import Model
-from database import transformer
+from database.models import Model
 import multiprocessing
 import base64
 from pydantic import BaseModel
@@ -37,28 +36,27 @@ app = FastAPI()
 
 class Server:
     def __init__(self, ip, port, master_ip, master_port, model, num_features,
-                 weights, use_dr, device, attention, image_folder, http, db_name,
-                 host):
+                 weights, use_dr, device, image_folder, http, db_name,
+                 host, name):
         self.ip = ip
         self.port = port
         self.master_ip = master_ip
         self.master_port = master_port
-        if model != 'transformer':
-            self.model = Model(model, num_features=num_features, name=weights,
-                               use_dr=use_dr, device=device, attention=attention)
-        else:
-            self.model = transformer.Model(num_features, name=weights, device=device)
+
+        self.model = Model(model, num_features=num_features, name=weights,
+                           use_dr=use_dr, device=device)
+
         self.database = Database(db_name, self.model, load=True,
                                  transformer = model=='transformer', device='cpu')
         self.image_folder = image_folder
         self.host = host
+        self.name = name
 
         self.pool = concurrent.futures.ThreadPoolExecutor()
 
         requests.get('{}://{}:{}/connect'.format('http' if http else 'https', master_ip, master_port),
                      params={'ip': '{}:{}'.format(self.ip, self.port), 'nbr_images_labeled': self.database.index_labeled.ntotal,
                              'nbr_images_unlabeled': self.database.index_unlabeled.ntotal})
-
 
 parser = argparse.ArgumentParser()
 
@@ -85,7 +83,7 @@ parser.add_argument(
 )
 
 parser.add_argument(
-    '--model',
+    '--extractor',
     default='densenet'
 )
 
@@ -112,11 +110,6 @@ parser.add_argument(
 )
 
 parser.add_argument(
-    '--attention',
-    action='store_true'
-)
-
-parser.add_argument(
     '--folder',
     default='images'
 )
@@ -135,6 +128,10 @@ parser.add_argument(
     '--host'
 )
 
+parser.add_argument(
+    '--server_name'
+)
+
 args = parser.parse_args()
 
 if args.gpu_id >= 0:
@@ -144,9 +141,9 @@ else:
 
 if __name__ != '__main__':
     server = Server(args.ip, args.port, args.master_ip, args.master_port,
-                    args.model, args.num_features, args.weights, args.use_dr,
-                    device, args.attention, args.folder, args.http, args.db_name,
-                    args.host)
+                    args.extractor, args.num_features, args.weights, args.use_dr,
+                    device, args.folder, args.http, args.db_name,
+                    args.host, args.server_name)
 
     names = {}
 
@@ -180,11 +177,13 @@ def retrieve_images(retrieve_class: str, labels: LabelList, public_key: str, pri
             raise HTTPException(401, 'Unauthorized')
 
     images = []
+    img_names = []
     if retrieve_class == 'true':
         cls = []
 
         for i in labels.labels:
             img = Image.open(names[public_key][int(i)])
+            img_names.append(names[public_key][int(i)])
             end = names[public_key][int(i)].rfind("/")
             begin = names[public_key][int(i)].rfind("/", 0, end) + 1
             cls.append(names[public_key][int(i)][begin: end])
@@ -194,21 +193,24 @@ def retrieve_images(retrieve_class: str, labels: LabelList, public_key: str, pri
 
             images.append(base64.b64encode(bytes_io.getvalue()))
 
-        return {'images': images, 'cls': cls}
+        return {'images': images, 'cls': cls, 'names': img_names}
     elif retrieve_class == 'false':
         for i in labels.labels:
+            print(i, names[public_key])
             img = Image.open(names[public_key][int(i)])
+            img_names.append(names[public_key][int(i)])
             bytes_io = BytesIO()
             img.save(bytes_io, 'png')
             bytes_io.seek(0)
 
             images.append(base64.b64encode(bytes_io.getvalue()))
-        return {'images': images, 'cls': ["Unkown" for i in images]}
+        return {'images': images, 'cls': ["Unkown" for i in images], 'names': img_names}
     elif retrieve_class == 'mix':
         cls = []
 
         for i in labels.labels:
             img = Image.open(names[public_key][int(i)])
+            img_names.append(names[public_key][int(i)])
             if names[public_key][int(i)].count('/') > 1:
                 end = names[public_key][int(i)].rfind("/")
                 begin = names[public_key][int(i)].rfind("/", 0, end) + 1
@@ -221,7 +223,7 @@ def retrieve_images(retrieve_class: str, labels: LabelList, public_key: str, pri
 
             images.append(base64.b64encode(bytes_io.getvalue()))
 
-        return {'images': images, 'cls': cls}
+        return {'images': images, 'cls': cls, 'names': img_names}
 
 @app.post('/index_image')
 async def index_image(public_key: str, private_key: str, image: UploadFile=File(...), label: str=''):
@@ -236,9 +238,10 @@ async def index_image(public_key: str, private_key: str, image: UploadFile=File(
 
     async with await lock.gen_wlock():
         last_id = server.database.r.get('last_id_{}'.format('labeled' if label != '' else 'unlabeled')).decode('utf-8')
+        print(last_id)
         if not os.path.exists(os.path.join(server.image_folder, label)):
             os.makedirs(os.path.join(server.image_folder, label))
-            img.save(os.path.join(server.image_folder, label, last_id + '.png'), 'PNG')
+        img.save(os.path.join(server.image_folder, label, server.name + '_' + last_id + '.png'), 'PNG')
 
         with torch.no_grad():
             if not server.database.feat_extract:
@@ -254,7 +257,7 @@ async def index_image(public_key: str, private_key: str, image: UploadFile=File(
             out = server.model(image.to(device=next(server.model.parameters()).device).view(1, 3, 224, 224))
 
             server.database.add(out.cpu().numpy().reshape(-1, server.model.num_features),
-                                [os.path.join(server.image_folder, label, last_id + '.png')], label!='')
+                                [os.path.join(server.image_folder, label, server.name + '_' + last_id + '.png')], label!='')
 
             server.database.save()
     return
@@ -268,7 +271,10 @@ async def index_folder(labeled: bool, public_key: str, private_key: str, folder:
 
     content = await folder.read()
 
-    zf = zipfile.ZipFile(BytesIO(content))
+    try:
+        zf = zipfile.ZipFile(BytesIO(content))
+    except zipfile.BadZipFile as e:
+        raise HTTPException(401, str(e))
     name_list = zf.namelist()
 
     name_list_bis = []
@@ -305,10 +311,10 @@ async def index_folder(labeled: bool, public_key: str, private_key: str, folder:
                 names = name_list_bis[i*batch_size: (i + 1)*batch_size]
             async with await lock.gen_wlock():
                 id = int(server.database.r.get('last_id_{}'.format('labeled' if labeled else 'unlabeled')).decode('utf-8'))
-                data = dataset.AddDatasetList(id, names, not server.database.feat_extract)
+                data = dataset.AddDatasetList(id, names, server.name, not server.database.feat_extract)
                 for name, n in names:
                     img = Image.open(BytesIO(zf.read(n)))
-                    img.save(os.path.join(name, str(id)) + '.png', 'PNG')
+                    img.save(os.path.join(name, server.name + '_' + str(id)) + '.png', 'PNG')
                     id += 1
                 loader = torch.utils.data.DataLoader(data, batch_size=batch_size, pin_memory=True)
                 for batch, n in loader:
@@ -363,8 +369,8 @@ async def add_slide(public_key: str, private_key: str, image_params: CytomineIma
         im.resolution = image_params.resolution
         im.magnification = image_params.magnification
         im.filename, im.originalFilename = image_params.filename, image_params.originalFilename
-        # await loop.run_in_executor(
-            # server.pool, im.download, os.path.join(str(image_params.project), '{originalFilename}'))
+        await loop.run_in_executor(
+            server.pool, im.download, os.path.join(str(image_params.project), '{originalFilename}'))
 
     loop = asyncio.get_running_loop()
     slide = OpenSlide(os.path.join(str(image_params.project), image_params.originalFilename))

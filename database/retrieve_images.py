@@ -1,6 +1,6 @@
 from database.db import Database
 from argparse import ArgumentParser, ArgumentTypeError
-import database.densenet as densenet
+import database.models as models
 from PIL import Image
 import time
 import torch
@@ -44,7 +44,7 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        '--file_name',
+        '--weights',
         help='file that contains the weights of the network',
         default='weights'
     )
@@ -52,11 +52,6 @@ if __name__ == "__main__":
     parser.add_argument(
         '--dr_model',
         action="store_true"
-    )
-
-    parser.add_argument(
-        '--attention',
-        action='store_true'
     )
 
     parser.add_argument(
@@ -80,17 +75,8 @@ if __name__ == "__main__":
         print('Path mentionned is not a file')
         exit(-1)
 
-    model = None
-
-    if args.extractor != "transformer":
-        model = densenet.Model(model=args.extractor, num_features=args.num_features, name=args.file_name,
-                               use_dr=args.dr_model, attention=args.attention, device=device)
-    else:
-        model = transformer.Model(num_features=args.num_features, name=args.file_name, device=device)
-
-    if model is None:
-        print("Unkown feature extractor")
-        exit(-1)
+    model = models.Model(model=args.extractor, num_features=args.num_features, name=args.weights,
+                           use_dr=args.dr_model, device=device)
 
     retriever = ImageRetriever(args.db_name, model)
 

@@ -1,5 +1,5 @@
 import faiss
-import database.densenet as densenet
+import database.models as models
 import torch
 import database.dataset as dataset
 from PIL import Image
@@ -11,6 +11,7 @@ from transformers import DeiTFeatureExtractor
 import time
 import json
 import os
+import argparse
 
 class Database:
     def __init__(self, filename, model, load=False, transformer=False, device='cpu'):
@@ -45,6 +46,7 @@ class Database:
             self.index_labeled = faiss.index_cpu_to_gpu(res_labeled, 0, self.index_labeled)
             self.index_unlabeled = faiss.index_cpu_to_gpu(res_unlabeled, 0, self.index_unlabeled)
 
+        self.transformer = transformer
         self.feat_extract = DeiTFeatureExtractor.from_pretrained('facebook/deit-base-distilled-patch16-224',
                                                                  size=224, do_center_crop=False,
                                                                  image_mean=[0.485, 0.456, 0.406],
@@ -78,12 +80,10 @@ class Database:
 
     @torch.no_grad()
     def add_dataset(self, data_root, name_list=[], label=True):
-        transformer = not self.feat_extract
-
         if name_list == []:
-            data = dataset.AddDataset(data_root, transformer)
+            data = dataset.AddDataset(data_root, self.transformer)
         else:
-            data = dataset.AddDatasetList(data_root, name_list, transformer)
+            data = dataset.AddDatasetList(data_root, name_list, self.transformer)
         loader = torch.utils.data.DataLoader(data, batch_size=128, num_workers=12, pin_memory=True)
 
         for i, (images, filenames) in enumerate(loader):
@@ -127,7 +127,6 @@ class Database:
         elif retrieve_class == 'false':
             distance, labels = self.index_unlabeled.search(out.cpu().numpy(), nrt_neigh)
             labels = [l for l in list(labels[0]) if l != -1]
-
             names = []
             for l in labels:
                 n = self.r.get(str(l) + 'unlabeled').decode('utf-8')
@@ -228,7 +227,7 @@ class Database:
                             str_num += line[:idx]
                             if self.r.get(str(nbr) + 'labeled') is not None:
                                 vec = np.fromstring(str_num, dtype=np.float32, sep=' ')
-                                newfile.write(str(nbr) + str(vec))
+                                newfile.write('\n' + str(nbr) + str(vec))
                                 keys.append(nbr)
                                 x.append(vec)
                                 str_num = ''
@@ -260,9 +259,6 @@ class Database:
                     key = keys[i * batch_size: (i+1) * batch_size]
                 self.index_labeled.add_with_ids(x_, np.array(key, dtype=np.int64))
 
-
-
-
         num_batches = batch_size // batch_size
         x = []
         keys = []
@@ -283,18 +279,18 @@ class Database:
                             str_num += line[:idx]
                             if self.r.get(str(nbr) + 'unlabeled') is not None:
                                 vec = np.fromstring(str_num, dtype=np.float32, sep=' ')
-                                newfile.write(str(nbr) + str(vec))
+                                newfile.write('\n' + str(nbr) + str(vec))
                                 keys.append(nbr)
                                 x.append(vec)
                                 str_num = ''
                         else:
                             str_num += line
         if len(x) >= 10:
+            num_clusters = int(np.sqrt(self.index_unlabeled.ntotal))
             self.quantizer = faiss.IndexFlatL2(self.model.num_features)
             self.index_unlabeled = faiss.IndexIVFFlat(self.quantizer, self.model.num_features,
                                                       num_clusters)
             num_clusters = int(np.sqrt(self.index_unlabeled.ntotal))
-
 
             if self.device == 'gpu':
                 res_unlabeled = faiss.StandardGpuResources()
@@ -317,7 +313,6 @@ class Database:
         os.replace(self.filename + '_newunlabeledvectors', self.filename + '_unlabeledvectors')
         os.replace(self.filename + '_newlabeledvectors', self.filename + '_labeledvectors')
 
-
     def save(self):
         if self.device != 'gpu':
             faiss.write_index(self.index_labeled, self.name + '_labeled')
@@ -327,9 +322,25 @@ class Database:
             faiss.write_index(faiss.index_gpu_to_cpu(self.index_unlabeled), self.name + '_unlabeled')
 
 if __name__ == "__main__":
-    model = densenet.Model(num_features=128, model='resnet', name='weights/weights_resnet_margin_dr_49')
-    database = Database("store/resnet", model, load=True)
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        '--extractor',
+        default='densenet'
+    )
+
+    parser.add_argument(
+        '--weights'
+    )
+
+    parser.add_argument(
+        '--db_name'
+    )
+
+    args = parser.parse_args()
+
+    model = models.Model(num_features=128, model=args.extractor, name=args.weights)
+    database = Database(args.db_name, model, load=True)
     database.train()
     database.save()
     print(database.index_labeled.ntotal)
-    # print(database.index_labeled.ntotal)

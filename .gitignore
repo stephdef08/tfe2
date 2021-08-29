@@ -5,5 +5,4 @@ dump.rdb
 store/*
 db_unlabeled
 db_labeled
-test*
 images*
