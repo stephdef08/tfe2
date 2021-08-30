@@ -127,6 +127,7 @@ class Database:
             distance, labels = self.index_unlabeled.search(out.cpu().numpy(), nrt_neigh)
             labels = [l for l in list(labels[0]) if l != -1]
             names = []
+            print(distance)
             for l in labels:
                 n = self.r.get(str(l) + 'unlabeled').decode('utf-8')
                 names.append(n)
@@ -202,14 +203,10 @@ class Database:
 
         os.remove(name)
 
-    def train(self):
+    def train_labeled(self):
         batch_size = 128
-        num_batches = batch_size // batch_size
         x = []
         keys = []
-
-        i = 0
-
         with open(self.filename + '_labeledvectors', 'r') as file:
             with open(self.filename + '_newlabeledvectors', 'w') as newfile:
                 lines = file.readlines()
@@ -245,9 +242,10 @@ class Database:
 
             x = np.array(x, dtype=np.float32)
 
-
             self.index_labeled.train(x)
             self.index_labeled.nprobe = num_clusters // 10
+
+            num_batches = self.index_labeled.ntotal // batch_size
 
             for i in range(num_batches+1):
                 if i == num_batches:
@@ -257,11 +255,12 @@ class Database:
                     x_ = x[i * batch_size: (i + 1) * batch_size, :]
                     key = keys[i * batch_size: (i+1) * batch_size]
                 self.index_labeled.add_with_ids(x_, np.array(key, dtype=np.int64))
+        os.replace(self.filename + '_newlabeledvectors', self.filename + '_labeledvectors')
 
-        num_batches = batch_size // batch_size
+    def train_unlabeled(self):
+        batch_size = 128
         x = []
         keys = []
-
         with open(self.filename + '_unlabeledvectors', 'r') as file:
             with open(self.filename + '_newunlabeledvectors', 'w') as newfile:
                 lines = file.readlines()
@@ -289,7 +288,6 @@ class Database:
             self.quantizer = faiss.IndexFlatL2(self.model.num_features)
             self.index_unlabeled = faiss.IndexIVFFlat(self.quantizer, self.model.num_features,
                                                       num_clusters)
-            num_clusters = int(np.sqrt(self.index_unlabeled.ntotal))
 
             if self.device == 'gpu':
                 res_unlabeled = faiss.StandardGpuResources()
@@ -299,6 +297,8 @@ class Database:
 
             self.index_unlabeled.train(x)
             self.index_unlabeled.nprobe = num_clusters // 10
+
+            num_batches = self.index_unlabeled.ntotal // batch_size
 
             for i in range(num_batches+1):
                 if i == num_batches:
@@ -310,7 +310,6 @@ class Database:
                 self.index_unlabeled.add_with_ids(x_, np.array(key, dtype=np.int64))
 
         os.replace(self.filename + '_newunlabeledvectors', self.filename + '_unlabeledvectors')
-        os.replace(self.filename + '_newlabeledvectors', self.filename + '_labeledvectors')
 
     def save(self):
         if self.device != 'gpu':
@@ -336,10 +335,18 @@ if __name__ == "__main__":
         '--db_name'
     )
 
+    parser.add_argument(
+        '--unlabeled',
+        action='store_true'
+    )
+
     args = parser.parse_args()
 
     model = models.Model(num_features=128, model=args.extractor, name=args.weights)
     database = Database(args.db_name, model, load=True)
-    database.train()
+    if args.unlabeled:
+        database.train_unlabeled()
+        print(database.search(Image.open('/home/stephan/Documents/tfe4/1.png').convert('RGB'), 10, 'false'))
+    else:
+        database.train_labeled()
     database.save()
-    print(database.index_labeled.ntotal)
