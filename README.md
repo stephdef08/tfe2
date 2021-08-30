@@ -127,3 +127,18 @@ python rest/server.py [arguments]
 - --server_name (required): name of the server
 
 The REST API can be tested with FastAPI documentation, by going at the address `[http|https]://master_ip:master_port/docs`
+
+## Training a Faiss index
+If the server is running, it must first be shut down
+
+The following command is executed to train the index on the whole dataset indexed locally
+
+```bash
+python database/db.py [arguments]
+```
+
+with the following arguments:
+- --extractor (default: densenet): densenet, resnet or transformer
+- --weights (required): name of the file containing the weights of the model
+- --db_name: name of the database
+- --unlabeled (flag): if raised, train the unlabeled index instead of the labeled
