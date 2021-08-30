@@ -4,7 +4,6 @@ import database.models as models
 from PIL import Image
 import time
 import torch
-import database.transformer as transformer
 import os
 
 class ImageRetriever:
@@ -58,6 +57,12 @@ if __name__ == "__main__":
         type=int
     )
 
+    parser.add_argument(
+        '--nrt_neigh',
+        default=10,
+        type=int
+    )
+
     args = parser.parse_args()
 
     if args.gpu_id >= 0:
@@ -78,7 +83,7 @@ if __name__ == "__main__":
 
     retriever = ImageRetriever(args.db_name, model)
 
-    names = retriever.retrieve(Image.open(args.path).convert('RGB'))
+    names = retriever.retrieve(Image.open(args.path).convert('RGB'), args.nrt_neigh)
     for n in names:
         Image.open(n).show()
     print(names)

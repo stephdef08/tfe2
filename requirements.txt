@@ -1,3 +1,5 @@
+Tested with python3.9
+
 pytorch with cuda support
 pillow
 torchvision
