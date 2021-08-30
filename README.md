@@ -89,7 +89,7 @@ The following arguments can be given in the command line:
 - --weights (default: weights): file storing the weights of the network
 - --db_name (default: db): name of the database
 - --gpu_id (default: 0): id of the gpu on which the extractor is loaded
-- --measure (default: random): random, remove or all. `Random stands` for the random sampling of query images in each classes, `remove stands for the removal of camelyon16_0 and janowczyk6_0, and for `all`, all the images are considered
+- --measure (default: random): random, remove or all. `Random` stands for the random sampling of query images in each classes, `remove` stands for the removal of camelyon16_0 and janowczyk6_0, and for `all`, all the images are considered
 - --generalise (flag): use only half the classes to compute the accuracy
 
 The folder that contains the images must have the same structure that the one used for training
