@@ -359,6 +359,7 @@ class CytomineImage(BaseModel):
 
 @app.get('/add_slide')
 async def add_slide(public_key: str, private_key: str, image_params: CytomineImage):
+    loop = asyncio.get_running_loop()
     with Cytomine(host=server.host, public_key=public_key, private_key=private_key):
         user = CurrentUser().fetch()
         if user is False:
@@ -372,7 +373,6 @@ async def add_slide(public_key: str, private_key: str, image_params: CytomineIma
         await loop.run_in_executor(
             server.pool, im.download, os.path.join(str(image_params.project), '{originalFilename}'))
 
-    loop = asyncio.get_running_loop()
     slide = OpenSlide(os.path.join(str(image_params.project), image_params.originalFilename))
     slide.get_thumbnail((512, 512))
 
@@ -440,6 +440,7 @@ async def add_slide(public_key: str, private_key: str, image_params: CytomineIma
 
 @app.get('/add_slide_annotations')
 async def add_slide_annotations(public_key: str, private_key: str, project_id: int, term: str):
+    loop = asyncio.get_running_loop()
     with Cytomine(host=server.host, public_key=public_key, private_key=private_key):
         user = CurrentUser().fetch()
         if user is False:
