@@ -124,7 +124,7 @@ python rest/server.py [arguments]
 - --folder (default: images): folder where the images will be stored
 - --http (flag): use the HTTP protocol instead of HTTPS
 - --db_name (default: db): name of the database
-- --server_name (required): name of the server
+- --server_name (required): name of the server. Two different servers should have a different name
 
 The REST API can be tested with FastAPI documentation, by going at the address `[http|https]://master_ip:master_port/docs`
 
@@ -140,5 +140,5 @@ python database/db.py [arguments]
 with the following arguments:
 - --extractor (default: densenet): densenet, resnet or transformer
 - --weights (required): name of the file containing the weights of the model
-- --db_name: name of the database
+- --db_name (required): name of the database
 - --unlabeled (flag): if raised, train the unlabeled index instead of the labeled
