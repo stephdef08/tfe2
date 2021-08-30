@@ -71,6 +71,7 @@ The following arguments can be given in the command line:
 - --weights (default: weights): file storing the weights of the extractor
 - --dr_model (flag): whether to use the two shallow convolutional networks or not
 - --gpu_id (default: 0): id of the gpu on which the extractor is loaded
+- --nrt_neigh (default: 10): number of images to retrieve
 
 The folder that contains the images must have the same structure that the one used for training
 
