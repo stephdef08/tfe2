@@ -8,10 +8,6 @@ from torch.utils.data import Dataset
 import os
 import numpy as np
 import sklearn
-import sklearn.metrics
-import pandas as pd
-import seaborn as sn
-import matplotlib.pyplot as plt
 import time
 
 class TestDataset(Dataset):
@@ -145,6 +141,10 @@ def test(model, dataset, db_name, extractor, measure, generalise):
     print('t_model:', t_model)
     print('t_search:', t_search)
 
+    import seaborn as sn
+    import matplotlib.pyplot as plt
+    import sklearn.metrics
+    import pandas as pd
     cm = sklearn.metrics.confusion_matrix(ground_truth, predictions)
     df_cm = pd.DataFrame(cm, index=data.conversion.keys(), columns=data.conversion.keys())
     plt.figure(figsize = (10,7))

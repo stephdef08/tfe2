@@ -4,6 +4,17 @@ parts of codes are taken from:
 - https://github.com/euwern/proxynca_pp
 - https://github.com/SathwikTejaswi/deep-ranking/blob/master/Code/data_utils.py
 
+##Requirements
+
+The library was tested with python 3.9
+```
+pip install -r requirements.txt
+```
+
+Two more external libraries have to be installed:
+- Cytomine (https://doc.cytomine.org/dev-guide/clients/python/installation)
+- OpenSlide (https://pypi.org/project/openslide-python/)
+
 The required libraries are in the file requirements.txt
 
 ## Training a new model
