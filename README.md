@@ -4,7 +4,7 @@ parts of codes are taken from:
 - https://github.com/euwern/proxynca_pp
 - https://github.com/SathwikTejaswi/deep-ranking/blob/master/Code/data_utils.py
 
-##Requirements
+## Requirements
 
 The library was tested with python 3.9
 ```
